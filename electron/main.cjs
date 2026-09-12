@@ -752,24 +752,86 @@ ipcMain.handle('get-lyrics', async (_e, track) => {
   return null;
 });
 
-// ── Listen Together (LAN) ─────────────────────────────────
-// Host runs a ws server; guests' renderers connect directly via
-// WebSocket('ws://host:port'). The host renderer is authoritative — it
-// pushes state through 'room-broadcast' and we relay to every client.
+// ── Listen Together ───────────────────────────────────────
+// Host runs a ws server; guests' renderers connect via WebSocket.
+// LAN: ws://ip:port. Internet: a cloudflared quick tunnel exposes the
+// same local server as wss://<random>.trycloudflare.com — no account,
+// no port forwarding. Guest commands are forwarded to the host renderer
+// ('room-command') so anyone in the room can control playback.
 let roomWss = null;
+let roomTunnelProc = null;
+let roomPublicUrl = null;
+
+function getCloudflaredPath() {
+  const binName = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
+  for (const p of [
+    path.join(__dirname, '..', 'bin', binName),
+    path.join(process.resourcesPath || '', 'bin', binName),
+  ]) {
+    try { if (fs.statSync(p).isFile()) return p; } catch {}
+  }
+  return binName; // PATH fallback
+}
+
+// Spawn `cloudflared tunnel --url http://127.0.0.1:<port>` and grab the
+// public https URL it prints. Resolves null on failure/timeout — the
+// caller then falls back to LAN ip:port.
+function startRoomTunnel(localPort) {
+  return new Promise((resolve) => {
+    let resolved = false;
+    const done = (url) => { if (!resolved) { resolved = true; resolve(url); } };
+    try {
+      const proc = execFile(getCloudflaredPath(), [
+        'tunnel', '--url', `http://127.0.0.1:${localPort}`, '--no-autoupdate',
+      ]);
+      roomTunnelProc = proc;
+      const onData = (buf) => {
+        const m = buf.toString().match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+        if (m) done(m[0]);
+      };
+      proc.stdout.on('data', onData);
+      proc.stderr.on('data', onData);
+      proc.on('exit', () => done(null));
+      setTimeout(() => done(null), 15000);
+    } catch {
+      done(null);
+    }
+  });
+}
 
 ipcMain.handle('room-host', async () => {
-  if (roomWss) return roomWss.address().port;
+  if (roomWss) {
+    return { port: roomWss.address().port, publicUrl: roomPublicUrl };
+  }
   const { WebSocketServer } = require('ws');
   roomWss = new WebSocketServer({ host: '0.0.0.0', port: 0 });
   await new Promise((resolve, reject) => {
     roomWss.once('listening', resolve);
     roomWss.once('error', reject);
   });
-  return roomWss.address().port;
+  const port = roomWss.address().port;
+
+  // Guest commands → host renderer (anyone in the room can control)
+  roomWss.on('connection', (ws) => {
+    ws.on('message', (d) => {
+      try {
+        const msg = JSON.parse(d);
+        BrowserWindow.getAllWindows()[0]?.webContents.send('room-command', msg);
+      } catch { /* malformed message */ }
+    });
+  });
+
+  // Try to open a public tunnel so guests on other networks can join
+  roomPublicUrl = await startRoomTunnel(port);
+  return { port, publicUrl: roomPublicUrl };
 });
 
 ipcMain.handle('room-stop', async () => {
+  if (roomTunnelProc) {
+    try { roomTunnelProc.kill(); } catch {}
+    roomTunnelProc = null;
+  }
+  roomPublicUrl = null;
   if (!roomWss) return;
   const wss = roomWss;
   roomWss = null;

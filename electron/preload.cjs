@@ -28,6 +28,11 @@ contextBridge.exposeInMainWorld('cupid', {
   roomBroadcast: (msg) => ipcRenderer.send('room-broadcast', msg),
   roomPeerCount: () => ipcRenderer.invoke('room-peer-count'),
   roomLocalIp: () => ipcRenderer.invoke('room-local-ip'),
+  onRoomCommand: (cb) => {
+    const listener = (_e, msg) => cb(msg);
+    ipcRenderer.on('room-command', listener);
+    return () => ipcRenderer.removeListener('room-command', listener);
+  },
   getLocalAudioPath: (filename) => ipcRenderer.invoke('get-local-audio-path', filename),
   openMusicFolder: () => ipcRenderer.invoke('open-music-folder'),
   youtubeFetchPlaylist: (url) => ipcRenderer.invoke('youtube-fetch-playlist', url),

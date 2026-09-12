@@ -232,6 +232,12 @@ export default function App() {
   }), []);
   const room = useRoom({ getPlayerState, playerRef, playTrackList });
 
+  // In a room as guest, transport controls forward to the host instead
+  const doTogglePlay = () => room.role === 'guest' ? room.command('toggle') : togglePlay();
+  const doNext = () => room.role === 'guest' ? room.command('next') : next();
+  const doPrev = () => room.role === 'guest' ? room.command('prev') : prev();
+  const doSeek = (pct) => room.role === 'guest' ? room.command('seek', { fraction: pct }) : seek(pct);
+
   // ── EQ ───────────────────────────────────────────────────
   const [eqGains, setEqGains] = useState(() => {
     try {
@@ -408,15 +414,22 @@ export default function App() {
   const [hoverProgress, setHoverProgress] = useState(null);
   const seekRef = useRef(null);
 
+  const lastSeekPctRef = useRef(null);
   useEffect(() => {
     if (!dragging) return;
     const onMouseMove = (e) => {
       const rect = seekRef.current.getBoundingClientRect();
       const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
       setHoverProgress(pct);
-      seek(pct);
+      lastSeekPctRef.current = pct;
+      // Room guests don't scrub locally — send the final position on release
+      if (room.role !== 'guest') seek(pct);
     };
     const onMouseUp = () => {
+      if (room.role === 'guest' && lastSeekPctRef.current != null) {
+        room.command('seek', { fraction: lastSeekPctRef.current });
+      }
+      lastSeekPctRef.current = null;
       setDragging(false);
       setStarHovered(false);
       setHoverProgress(null);
@@ -427,7 +440,7 @@ export default function App() {
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     };
-  }, [dragging, seek]);
+  }, [dragging, seek, room.role, room.command]);
 
   useEffect(() => {
     if (!volumeDragging) return;
@@ -675,14 +688,14 @@ export default function App() {
           const rect = e.currentTarget.getBoundingClientRect();
           const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
           setHoverProgress(pct);
-          seek(pct);
+          doSeek(pct);
         }}
       />
 
       {/* Playback control click targets */}
-      <div className="btn btn-prev" onClick={prev} />
-      <div className="btn btn-play" onClick={togglePlay} />
-      <div className="btn btn-next" onClick={next} />
+      <div className="btn btn-prev" onClick={doPrev} />
+      <div className="btn btn-play" onClick={doTogglePlay} />
+      <div className="btn btn-next" onClick={doNext} />
 
       {/* Volume bar layers — shown on hover or drag */}
       {(volumeHovered || volumeDragging) && (

@@ -6,7 +6,7 @@
   "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
-    "postinstall": "node scripts/install-yt-dlp.cjs",
+    "postinstall": "node scripts/install-yt-dlp.cjs && node scripts/install-cloudflared.cjs",
     "dev": "concurrently -k -n vite,electron -c blue,magenta \"vite\" \"wait-on tcp:5173 && cross-env NODE_ENV=development electron .\"",
     "vite": "vite",
     "build": "vite build",

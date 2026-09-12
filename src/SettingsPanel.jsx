@@ -310,13 +310,23 @@ export default function SettingsPanel({
           <>
             <div className="settings-label">listen together</div>
             {room.role ? (
-              <div className="settings-theme-row">
-                <span className="settings-label">
-                  {room.role === 'host' ? `hosting — ${room.address}` : `in room — ${room.address}`}
-                  {room.role === 'host' && room.peerCount > 0 ? ` (${room.peerCount} listening)` : ''}
-                </span>
-                <button className="settings-theme-btn" onClick={room.onLeave}>leave</button>
-              </div>
+              <>
+                <div className="settings-theme-row">
+                  <span className="settings-label">
+                    {room.role === 'connecting' ? 'connecting…'
+                      : room.role === 'host' ? `hosting — ${room.address}` : `in room — ${room.address}`}
+                    {room.role === 'host' && room.peerCount > 0 ? ` (${room.peerCount} listening)` : ''}
+                  </span>
+                  <button className="settings-theme-btn" onClick={room.onLeave}>
+                    {room.role === 'connecting' ? 'cancel' : 'leave'}
+                  </button>
+                </div>
+                {room.role === 'host' && (
+                  <div className="settings-label" style={{ opacity: 0.7 }}>
+                    share that address — works over the internet
+                  </div>
+                )}
+              </>
             ) : (
               <>
                 <button className="settings-theme-btn" onClick={room.onHost}>
