@@ -536,6 +536,40 @@
   max-width: calc(200 / 306 * var(--w));
 }
 
+/* Visualizer strip — sits between transport buttons and progress bar */
+.viz-canvas {
+  position: absolute;
+  left: calc(30 / 306 * var(--w));
+  top: calc(428 / 306 * var(--w));
+  width: calc(246 / 306 * var(--w));
+  height: calc(16 / 306 * var(--w));
+  image-rendering: pixelated;
+  z-index: 50;
+  pointer-events: none;
+}
+
+/* EQ panel — preset buttons + vertical band sliders */
+.eq-panel {
+  display: flex;
+  flex-direction: column;
+  gap: calc(4 / 306 * var(--w));
+}
+
+.eq-bands {
+  display: flex;
+  justify-content: space-between;
+}
+
+.eq-slider {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: calc(9 / 306 * var(--w));
+  height: calc(44 / 306 * var(--w));
+  margin: 0;
+  accent-color: var(--color-panel-text);
+  cursor: pointer;
+}
+
 /* Time display — elapsed left, remaining right */
 .time-display {
   position: absolute;

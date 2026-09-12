@@ -3,6 +3,9 @@ import { createPortal } from 'react-dom';
 import './App.css';
 import usePlayer from './usePlayer';
 import { createLocalAdapter, streamAdapter } from './audio/adapters.js';
+import { EQ_PRESETS } from './audio/AudioEngine.js';
+import Visualizer from './Visualizer.jsx';
+import EqPanel from './EqPanel.jsx';
 import useTheme from './useTheme';
 import { login as spotifyLogin, handleCallback, isLoggedIn as isSpotifyLoggedIn, logout as spotifyLogout } from './spotify/auth.js';
 import { fetchPlaylistTracks as fetchSpotifyTracks, fetchMyPlaylists as fetchSpotifyPlaylists } from './spotify/api.js';
@@ -259,6 +262,60 @@ export default function App() {
     toggleMute,
     loading: trackLoading,
   } = player;
+
+  // Ref so timers (sleep fade) always see the latest player controls
+  const playerRef = useRef(player);
+  playerRef.current = player;
+
+  // ── EQ ───────────────────────────────────────────────────
+  const [eqGains, setEqGains] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('cupid-eq-gains'));
+      if (Array.isArray(saved) && saved.length === 10) return saved;
+    } catch { /* ignore */ }
+    return [...EQ_PRESETS.flat];
+  });
+  useEffect(() => {
+    player.engine.setEq(eqGains);
+    try { localStorage.setItem('cupid-eq-gains', JSON.stringify(eqGains)); } catch { /* ignore */ }
+  }, [eqGains, player.engine]);
+
+  // ── Sleep timer — 30s volume fade then pause ─────────────
+  const [sleepMins, setSleepMins] = useState(0); // 0 = off
+  const fadeRef = useRef(null);
+  useEffect(() => {
+    if (!sleepMins) return;
+    const timer = setTimeout(() => {
+      const p = playerRef.current;
+      if (!p.isPlaying) { setSleepMins(0); return; }
+      const savedVol = p.volume;
+      let steps = 30;
+      fadeRef.current = {
+        savedVol,
+        interval: setInterval(() => {
+          steps--;
+          playerRef.current.setVolume(Math.max(0, savedVol * (steps / 30)));
+          if (steps <= 0) {
+            clearInterval(fadeRef.current.interval);
+            fadeRef.current = null;
+            const cur = playerRef.current;
+            if (cur.isPlaying) cur.togglePlay();
+            cur.setVolume(savedVol); // restore level for next play
+            setSleepMins(0);
+          }
+        }, 1000),
+      };
+    }, sleepMins * 60 * 1000);
+    return () => {
+      clearTimeout(timer);
+      if (fadeRef.current) {
+        // Fade interrupted — restore the pre-fade volume
+        clearInterval(fadeRef.current.interval);
+        playerRef.current.setVolume(fadeRef.current.savedVol);
+        fadeRef.current = null;
+      }
+    };
+  }, [sleepMins]);
 
   const cyclePlayMode = useCallback(() => {
     setPlayMode((m) => m === 'normal' ? 'shuffle' : m === 'shuffle' ? 'repeat' : 'normal');
@@ -609,6 +666,9 @@ export default function App() {
         </div>
       </div>
 
+      {/* Visualizer strip — between transport buttons and progress bar */}
+      <Visualizer engine={player.engine} playing={isPlaying} theme={theme} />
+
       {/* Time display */}
       <div className="time-display">
         <span className="time-current">{formatTime(currentTime)}</span>
@@ -728,6 +788,20 @@ export default function App() {
                 blue
               </button>
             </div>
+            <div className="settings-label">eq</div>
+            <EqPanel gains={eqGains} onChange={setEqGains} />
+            <div className="settings-label">sleep timer</div>
+            <SettingsDropdown
+              value={String(sleepMins)}
+              options={[
+                { value: '0', label: 'off' },
+                { value: '15', label: '15 min' },
+                { value: '30', label: '30 min' },
+                { value: '45', label: '45 min' },
+                { value: '60', label: '60 min' },
+              ]}
+              onChange={(v) => setSleepMins(Number(v))}
+            />
             <div className="settings-label">music</div>
             <SettingsDropdown
               value={musicService}
