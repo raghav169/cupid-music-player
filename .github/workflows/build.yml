@@ -28,6 +28,26 @@ jobs:
           # electron-builder downloads winCodeSign/NSIS from GitHub releases
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
+      # Boot the real unpacked exe — proves it launches on Windows, not
+      # just that it packaged. Exits 0 via CUPID_SMOKE_TEST; kill after 60s.
+      - name: Smoke test unpacked build
+        shell: pwsh
+        run: |
+          $env:CUPID_SMOKE_TEST = '1'
+          $exe = Get-ChildItem -Recurse out\win-unpacked -Filter "*.exe" | Where-Object { $_.Name -notmatch 'Uninstall' } | Select-Object -First 1
+          if (-not $exe) { Write-Error "no exe found in out\win-unpacked"; exit 1 }
+          Write-Host "smoke-testing $($exe.FullName)"
+          $p = Start-Process -FilePath $exe.FullName -PassThru -RedirectStandardOutput "$env:TEMP\cupid-smoke.log" -RedirectStandardError "$env:TEMP\cupid-smoke-err.log"
+          if (-not $p.WaitForExit(60000)) {
+            $p.Kill()
+            Write-Error "app did not exit within 60s (smoke hang)"
+            Get-Content "$env:TEMP\cupid-smoke.log" -ErrorAction SilentlyContinue
+            exit 1
+          }
+          Get-Content "$env:TEMP\cupid-smoke.log" -ErrorAction SilentlyContinue
+          Get-Content "$env:TEMP\cupid-smoke-err.log" -ErrorAction SilentlyContinue
+          exit $p.ExitCode
+      
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:

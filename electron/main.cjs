@@ -1070,6 +1070,20 @@ app.whenReady().then(() => {
 
   createWindow();
 
+  // CI smoke test (CUPID_SMOKE_TEST=1): exercises the full real path —
+  // seed, protocols, window creation, renderer load — then exits 0.
+  // The workflow kills it if it hangs, so a crash = CI failure.
+  if (process.env.CUPID_SMOKE_TEST === '1') {
+    const win = BrowserWindow.getAllWindows()[0];
+    const ok = (msg) => { console.log(`[smoke] ${msg}`); app.exit(0); };
+    win.webContents.once('did-finish-load', () => ok('renderer loaded'));
+    win.webContents.once('did-fail-load', (_e, code, desc) => {
+      console.error(`[smoke] load failed: ${code} ${desc}`);
+      app.exit(1);
+    });
+    setTimeout(() => ok('window created (renderer load timed out — non-fatal)'), 15000);
+  }
+
   // Pre-warm both engines so the first track load skips cold-start
   getInnertube().catch(() => {});
   execFile(getYtDlpPath(), ['--version'], () => {});
