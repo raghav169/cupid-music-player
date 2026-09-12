@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import EqPanel from './EqPanel.jsx';
+import { THEMES } from './useTheme.js';
 
 export function SettingsDropdown({ value, options, onChange }) {
   const [open, setOpen] = useState(false);
@@ -130,18 +131,15 @@ export default function SettingsPanel({
       <div className="settings-panel-inner">
         <div className="settings-label">theme</div>
         <div className="settings-theme-row">
-          <button
-            className={`settings-theme-btn ${theme === 'pink' ? 'active' : ''}`}
-            onClick={() => onTheme('pink')}
-          >
-            pink
-          </button>
-          <button
-            className={`settings-theme-btn ${theme === 'blue' ? 'active' : ''}`}
-            onClick={() => onTheme('blue')}
-          >
-            blue
-          </button>
+          {THEMES.map((t) => (
+            <button
+              key={t}
+              className={`settings-theme-btn ${theme === t ? 'active' : ''}`}
+              onClick={() => onTheme(t)}
+            >
+              {t}
+            </button>
+          ))}
         </div>
         <div className="settings-label">eq</div>
         <EqPanel gains={eqGains} onChange={onEqChange} />

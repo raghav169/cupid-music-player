@@ -14,6 +14,27 @@
   --color-panel-text: #C8D3F6;
 }
 
+/* Mint/lavender reuse pink assets hue-shifted on the artwork layers */
+.app-shell.theme-mint {
+  --color-title: #0e3d28;
+  --color-primary: #175a3a;
+  --color-secondary: #4a9a72;
+  --color-panel-text: #C8F6DC;
+}
+.app-shell.theme-mint .player .layer {
+  filter: hue-rotate(145deg) saturate(0.8) brightness(0.98);
+}
+
+.app-shell.theme-lavender {
+  --color-title: #2e1d4d;
+  --color-primary: #4a2a6b;
+  --color-secondary: #8a6ab0;
+  --color-panel-text: #E0D0F8;
+}
+.app-shell.theme-lavender .player .layer {
+  filter: hue-rotate(280deg) saturate(0.75) brightness(1.02);
+}
+
 /* Full mode: dimmed backdrop, side panels flanking the player column */
 .app-shell.mode-full {
   background: rgba(8, 6, 10, 0.72);
@@ -224,6 +245,14 @@
   pointer-events: auto;
   cursor: pointer;
   -webkit-app-region: no-drag;
+}
+
+/* Keyboard focus for the clickable control overlays */
+.btn:focus-visible,
+.btn-volume-icon:focus-visible {
+  outline: 2px solid var(--color-panel-text);
+  outline-offset: -1px;
+  border-radius: 2px;
 }
 
 .window-title {

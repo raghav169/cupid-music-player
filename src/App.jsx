@@ -395,7 +395,7 @@ export default function App() {
     }
   }, []);
 
-  const { theme, toggleTheme, assets } = useTheme();
+  const { theme, setTheme, assets } = useTheme();
 
   // ?mode=full forces full layout — handy for browser preview/QA
   const [winMode, setWinMode] = useState(() =>
@@ -519,8 +519,17 @@ export default function App() {
   const resizeBL = useResize('bottom-left');
   const resizeBR = useResize('bottom-right');
 
+  // Make clickable divs keyboard-activatable — Enter/Space fire onClick
+  const press = (onClick) => ({
+    role: 'button',
+    tabIndex: 0,
+    onKeyDown: (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(e); }
+    },
+  });
+
   return (
-    <div className={`app-shell ${theme === 'blue' ? 'theme-blue' : ''} ${winMode === 'full' ? 'mode-full' : ''}`}>
+    <div className={`app-shell theme-${theme} ${winMode === 'full' ? 'mode-full' : ''}`}>
     {winMode === 'full' && (
       <LibraryPanel
         playlists={playlists}
@@ -693,9 +702,9 @@ export default function App() {
       />
 
       {/* Playback control click targets */}
-      <div className="btn btn-prev" onClick={doPrev} />
-      <div className="btn btn-play" onClick={doTogglePlay} />
-      <div className="btn btn-next" onClick={doNext} />
+      <div className="btn btn-prev" onClick={doPrev} aria-label="previous" {...press(doPrev)} />
+      <div className="btn btn-play" onClick={doTogglePlay} aria-label={isPlaying ? 'pause' : 'play'} {...press(doTogglePlay)} />
+      <div className="btn btn-next" onClick={doNext} aria-label="next" {...press(doNext)} />
 
       {/* Volume bar layers — shown on hover or drag */}
       {(volumeHovered || volumeDragging) && (
@@ -721,6 +730,8 @@ export default function App() {
         <div
           className="btn-volume-icon"
           onClick={toggleMute}
+          aria-label={muted ? 'unmute' : 'mute'}
+          {...press(toggleMute)}
           onMouseEnter={() => setVolumeHovered(true)}
         />
         {(volumeHovered || volumeDragging) && (
@@ -739,15 +750,15 @@ export default function App() {
       </div>
 
       {/* Shuffle/repeat click target */}
-      <div className="btn btn-playmode" onClick={cyclePlayMode} title={playMode} />
+      <div className="btn btn-playmode" onClick={cyclePlayMode} title={playMode} aria-label={`play mode: ${playMode}`} {...press(cyclePlayMode)} />
 
       {/* Window control click targets */}
-      <div className="btn btn-minimize" onClick={() => window.cupid?.minimize()} />
-      <div className="btn btn-window" onClick={() => window.cupid?.toggleMode?.()} />
-      <div className="btn btn-exit" onClick={() => window.cupid?.close()} />
+      <div className="btn btn-minimize" onClick={() => window.cupid?.minimize()} aria-label="minimize" {...press(() => window.cupid?.minimize())} />
+      <div className="btn btn-window" onClick={() => window.cupid?.toggleMode?.()} aria-label="toggle compact/full mode" {...press(() => window.cupid?.toggleMode?.())} />
+      <div className="btn btn-exit" onClick={() => window.cupid?.close()} aria-label="close" {...press(() => window.cupid?.close())} />
 
       {/* Settings button */}
-      <div className="btn btn-settings" onClick={() => setShowSettings((v) => !v)} />
+      <div className="btn btn-settings" onClick={() => setShowSettings((v) => !v)} aria-label="settings" aria-expanded={showSettings} {...press(() => setShowSettings((v) => !v))} />
 
       {/* Debug overlays — toggle with showDebug state */}
       {showDebug && (
@@ -765,7 +776,7 @@ export default function App() {
       {showSettings && (
         <SettingsPanel
           theme={theme}
-          onTheme={(t) => { if (t !== theme) toggleTheme(); }}
+          onTheme={setTheme}
           eqGains={eqGains}
           onEqChange={setEqGains}
           sleepMins={sleepMins}

@@ -133,11 +133,14 @@ const THEME_ASSETS = {
 };
 
 const STORAGE_KEY = 'cupid-player-theme';
+// mint/lavender reuse pink assets — their hue shift lives in App.css
+// (.theme-mint/.theme-lavender apply a hue-rotate filter to .layer)
+export const THEMES = ['pink', 'blue', 'mint', 'lavender'];
 
 function getStoredTheme() {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === 'pink' || stored === 'blue') return stored;
+    if (THEMES.includes(stored)) return stored;
   } catch {
     // localStorage unavailable
   }
@@ -149,15 +152,25 @@ function getStoredTheme() {
  * the correct asset set for the active theme.
  */
 export default function useTheme() {
-  const [theme, setTheme] = useState(getStoredTheme);
+  const [theme, setThemeState] = useState(getStoredTheme);
 
   useEffect(() => {
     window.cupid?.setTheme(theme);
   }, [theme]);
 
+  const setTheme = useCallback((next) => {
+    if (!THEMES.includes(next)) return;
+    try {
+      localStorage.setItem(STORAGE_KEY, next);
+    } catch {
+      // ignore
+    }
+    setThemeState(next);
+  }, []);
+
   const toggleTheme = useCallback(() => {
-    setTheme((prev) => {
-      const next = prev === 'pink' ? 'blue' : 'pink';
+    setThemeState((prev) => {
+      const next = THEMES[(THEMES.indexOf(prev) + 1) % THEMES.length];
       try {
         localStorage.setItem(STORAGE_KEY, next);
       } catch {
@@ -167,7 +180,7 @@ export default function useTheme() {
     });
   }, []);
 
-  const assets = useMemo(() => THEME_ASSETS[theme], [theme]);
+  const assets = useMemo(() => THEME_ASSETS[theme === 'blue' ? 'blue' : 'pink'], [theme]);
 
-  return { theme, toggleTheme, assets };
+  return { theme, setTheme, toggleTheme, assets };
 }
