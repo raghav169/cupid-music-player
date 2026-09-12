@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 
 // ── Pink theme assets ────────────────────────────────────
 import pinkFrame from '../assets/pink/frame.png';
@@ -151,6 +151,10 @@ function getStoredTheme() {
 export default function useTheme() {
   const [theme, setTheme] = useState(getStoredTheme);
 
+  useEffect(() => {
+    window.cupid?.setTheme(theme);
+  }, [theme]);
+
   const toggleTheme = useCallback(() => {
     setTheme((prev) => {
       const next = prev === 'pink' ? 'blue' : 'pink';
@@ -159,7 +163,6 @@ export default function useTheme() {
       } catch {
         // ignore
       }
-      window.cupid?.setTheme(next);
       return next;
     });
   }, []);

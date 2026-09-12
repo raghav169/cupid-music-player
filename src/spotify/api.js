@@ -14,7 +14,14 @@ async function fetchWithRetry(url, options, retries = 3) {
   for (let i = 0; i <= retries; i++) {
     const res = await fetch(url, options);
     if (res.ok || (res.status < 500 && res.status !== 429)) return res;
-    if (i < retries) await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+    if (i < retries) {
+      // Honor Retry-After on 429s; fall back to linear backoff
+      const retryAfter = Number(res.headers.get('retry-after'));
+      const wait = Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter * 1000
+        : 1000 * (i + 1);
+      await new Promise((r) => setTimeout(r, wait));
+    }
   }
   return fetch(url, options);
 }

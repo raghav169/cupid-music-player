@@ -12,6 +12,16 @@ const jwt = require('jsonwebtoken');
 
 const execFileAsync = promisify(execFile);
 
+// CORS for custom protocol responses — required once the renderer routes
+// <audio> through Web Audio (MediaElementSource performs a CORS-enabled fetch).
+const CORS_HEADERS = { 'Access-Control-Allow-Origin': '*' };
+
+// Insertion-ordered eviction so stream/video caches can't grow unbounded.
+function cacheSetBounded(map, key, value, max = 500) {
+  if (!map.has(key) && map.size >= max) map.delete(map.keys().next().value);
+  map.set(key, value);
+}
+
 // Custom protocol used by the renderer's <audio> — main fetches the actual
 // stream so we can attach headers and forward Range requests for seeking.
 // Must be registered as privileged before app.whenReady fires.
@@ -30,22 +40,51 @@ protocol.registerSchemesAsPrivileged([
 let appleMusicToken = null;
 let appleMusicTokenExpiry = 0;
 
+// Packaged builds have no project .env — fall back to one in userData so
+// users can drop APPLE_TEAM_ID/APPLE_KEY_ID next to their .p8 key.
+let userDataEnvLoaded = false;
+function loadUserDataEnv() {
+  if (userDataEnvLoaded) return;
+  userDataEnvLoaded = true;
+  try {
+    const envPath = path.join(app.getPath('userData'), '.env');
+    if (fs.existsSync(envPath)) {
+      require('dotenv').config({ path: envPath, override: false });
+    }
+  } catch {
+    // no userData env — fine
+  }
+}
+
+// .p8 lives in the project root in dev; in packaged builds users drop it
+// into userData (e.g. %APPDATA%\Cupid Player\).
+function findAppleP8Key() {
+  const dirs = [path.join(__dirname, '..'), app.getPath('userData')];
+  for (const dir of dirs) {
+    try {
+      const keyFile = fs.readdirSync(dir).find((f) => f.endsWith('.p8'));
+      if (keyFile) return fs.readFileSync(path.join(dir, keyFile), 'utf8');
+    } catch {
+      // dir unreadable — try next
+    }
+  }
+  return null;
+}
+
 function generateAppleMusicToken() {
   if (appleMusicToken && Date.now() < appleMusicTokenExpiry) {
     return appleMusicToken;
   }
+
+  loadUserDataEnv();
 
   const teamId = process.env.APPLE_TEAM_ID;
   const keyId = process.env.APPLE_KEY_ID;
 
   if (!teamId || !keyId) return null;
 
-  // Find the .p8 key file in project root
-  const projectRoot = path.join(__dirname, '..');
-  const keyFiles = fs.readdirSync(projectRoot).filter((f) => f.endsWith('.p8'));
-  if (keyFiles.length === 0) return null;
-
-  const privateKey = fs.readFileSync(path.join(projectRoot, keyFiles[0]), 'utf8');
+  const privateKey = findAppleP8Key();
+  if (!privateKey) return null;
 
   appleMusicToken = jwt.sign({}, privateKey, {
     algorithm: 'ES256',
@@ -209,7 +248,7 @@ async function resolveStreamUrl(videoId) {
   const promise = (async () => {
     try {
       const url = await ytDlpExtract(`https://www.youtube.com/watch?v=${videoId}`);
-      decipheredCache.set(videoId, { url, time: Date.now() });
+      cacheSetBounded(decipheredCache, videoId, { url, time: Date.now() });
       return url;
     } finally {
       pendingDecipher.delete(videoId);
@@ -241,9 +280,9 @@ async function getStreamUrl(title, artist) {
           const result = await ytDlpSearch(title, artist);
           videoId = result.id;
           // We already have a usable URL from yt-dlp — seed the decipher cache
-          decipheredCache.set(videoId, { url: result.url, time: Date.now() });
+          cacheSetBounded(decipheredCache, videoId, { url: result.url, time: Date.now() });
         }
-        videoIdCache.set(cacheKey, videoId);
+        cacheSetBounded(videoIdCache, cacheKey, videoId, 2000);
         persistVideoIdCache();
       }
 
@@ -251,7 +290,7 @@ async function getStreamUrl(title, artist) {
       resolveStreamUrl(videoId).catch(() => {});
 
       const url = `cupid-audio://stream?id=${encodeURIComponent(videoId)}`;
-      streamCache.set(cacheKey, { url, time: Date.now() });
+      cacheSetBounded(streamCache, cacheKey, { url, time: Date.now() });
       return url;
     } finally {
       pendingRequests.delete(cacheKey);
@@ -316,25 +355,12 @@ function userPlaylistFile() {
 
 async function seedUserAudioDirIfMissing() {
   if (isDev) return;
+  const src = bundledAudioDir();
   const dest = userAudioDir();
   try {
-    await fs.promises.access(dest);
-    return;
-  } catch {
-    // doesn't exist yet — seed it
-  }
-
-  const src = bundledAudioDir();
-  await fs.promises.mkdir(dest, { recursive: true });
-
-  try {
-    const entries = await fs.promises.readdir(src);
-    await Promise.all(entries.map(async (name) => {
-      const from = path.join(src, name);
-      const to = path.join(dest, name);
-      const stat = await fs.promises.stat(from);
-      if (stat.isFile()) await fs.promises.copyFile(from, to);
-    }));
+    // Fill in files that don't exist yet — never overwrites user edits.
+    // Recursive so subdirectories like `song photos/` (album art) seed too.
+    await fs.promises.cp(src, dest, { recursive: true, force: false, errorOnExist: false });
   } catch (err) {
     console.warn('[seed audio]', err.message);
   }
@@ -370,6 +396,27 @@ function createWindow() {
   // Window control handlers
   let preMaxBounds = null;
 
+  // Two window modes: 'compact' (aspect-locked floating player) and 'full'
+  // (fullscreen; renderer re-lays-out as a centered full-height column).
+  let isFullMode = false;
+  let compactBounds = null;
+
+  const onToggleMode = () => {
+    if (win.isDestroyed()) return;
+    if (!isFullMode) {
+      compactBounds = win.getBounds();
+      win.setAspectRatio(0); // clear lock so fullscreen can go landscape
+      win.setFullScreen(true);
+      isFullMode = true;
+    } else {
+      win.setFullScreen(false);
+      win.setAspectRatio(ASPECT);
+      if (compactBounds) win.setBounds(compactBounds);
+      isFullMode = false;
+    }
+    win.webContents.send('window-mode-changed', isFullMode ? 'full' : 'compact');
+  };
+
   const onMinimize = () => win.minimize();
   const onMaximize = () => {
     if (preMaxBounds) {
@@ -394,7 +441,7 @@ function createWindow() {
   const onClose = () => win.close();
 
   const onResize = (_e, { dx, dy, corner }) => {
-    if (win.isDestroyed()) return;
+    if (win.isDestroyed() || isFullMode) return;
     const bounds = win.getBounds();
 
     const isRight = corner.includes('right');
@@ -475,6 +522,7 @@ function createWindow() {
   ipcMain.on('window-maximize', onMaximize);
   ipcMain.on('window-close', onClose);
   ipcMain.on('window-resize', onResize);
+  ipcMain.on('window-toggle-mode', onToggleMode);
   ipcMain.on('open-external', onOpenExternal);
   ipcMain.on('set-theme', onSetTheme);
 
@@ -484,6 +532,7 @@ function createWindow() {
     ipcMain.removeListener('window-maximize', onMaximize);
     ipcMain.removeListener('window-close', onClose);
     ipcMain.removeListener('window-resize', onResize);
+    ipcMain.removeListener('window-toggle-mode', onToggleMode);
     ipcMain.removeListener('open-external', onOpenExternal);
     ipcMain.removeListener('set-theme', onSetTheme);
   });
@@ -510,14 +559,16 @@ function createWindow() {
     }
   });
 
-  // Toggle DevTools with Cmd+Shift+I / Ctrl+Shift+I / F12
-  win.webContents.on('before-input-event', (_e, input) => {
-    if (input.type !== 'keyDown') return;
-    const isDevToolsShortcut = input.key.toLowerCase() === 'i' && input.shift && (input.meta || input.control);
-    if (isDevToolsShortcut || input.key === 'F12') {
-      win.webContents.toggleDevTools({ mode: 'detach' });
-    }
-  });
+  // Toggle DevTools with Cmd+Shift+I / Ctrl+Shift+I / F12 — dev only
+  if (isDev) {
+    win.webContents.on('before-input-event', (_e, input) => {
+      if (input.type !== 'keyDown') return;
+      const isDevToolsShortcut = input.key.toLowerCase() === 'i' && input.shift && (input.meta || input.control);
+      if (isDevToolsShortcut || input.key === 'F12') {
+        win.webContents.toggleDevTools({ mode: 'detach' });
+      }
+    });
+  }
 
   if (isDev) {
     win.loadURL('http://127.0.0.1:5173');
@@ -552,13 +603,16 @@ ipcMain.handle('get-local-playlist', async () => {
 
 ipcMain.handle('get-local-audio-path', (_e, filename) => {
   if (typeof filename !== 'string' || !filename) return null;
-  // Reject path traversal and absolute paths — filename must be a basename
-  if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+  // Normalize and reject path traversal and absolute paths — filename can be relative subpath
+  const normalized = path.normalize(filename);
+  if (normalized.startsWith('..') || path.isAbsolute(normalized)) {
     return null;
   }
-  // Use a custom protocol so the dev renderer (served over http://) can play it —
-  // <audio> won't load file:// URLs cross-origin.
-  return `cupid-local://audio/${encodeURIComponent(filename)}`;
+  // Convert to forward slashes — path.normalize produces '\' on Windows, which
+  // the cupid-local handler rejects. Use a custom protocol so the dev renderer
+  // (served over http://) can play it — <audio> won't load file:// cross-origin.
+  const posixPath = normalized.split(path.sep).join('/');
+  return `cupid-local://audio/${encodeURIComponent(posixPath)}`;
 });
 
 ipcMain.handle('open-music-folder', async () => {
@@ -585,16 +639,17 @@ ipcMain.handle('youtube-fetch-playlist', async (_e, url) => {
 // (embedded-webview policy), so we open the system browser and run a tiny
 // local HTTP server to capture the redirect. Returns the auth code synchronously
 // after the user completes the flow in their browser.
-let activeOauthServer = null;
+let activeOauth = null;
 
 ipcMain.handle('youtube-oauth-start', async (_e, { clientId, scope, state, codeChallenge }) => {
   // Tear down any previous attempt
-  if (activeOauthServer) {
-    try { activeOauthServer.close(); } catch {}
-    activeOauthServer = null;
+  if (activeOauth) {
+    try { activeOauth.reject(new Error('cancelled')); } catch {}
+    try { activeOauth.server.close(); } catch {}
+    activeOauth = null;
   }
 
-  const { port, server, codePromise } = await new Promise((resolve, reject) => {
+  const { port, server, codePromise, rejectCode } = await new Promise((resolve, reject) => {
     let resolveCode, rejectCode;
     const codePromise = new Promise((r1, r2) => { resolveCode = r1; rejectCode = r2; });
 
@@ -629,11 +684,13 @@ ipcMain.handle('youtube-oauth-start', async (_e, { clientId, scope, state, codeC
 
     srv.on('error', reject);
     srv.listen(0, '127.0.0.1', () => {
-      resolve({ port: srv.address().port, server: srv, codePromise });
+      resolve({ port: srv.address().port, server: srv, codePromise, rejectCode });
     });
   });
 
-  activeOauthServer = server;
+  // Keep the reject fn reachable so cancel/timeout can settle the promise —
+  // otherwise the renderer's await hangs forever after the server is closed.
+  activeOauth = { server, reject: rejectCode };
 
   const redirectUri = `http://127.0.0.1:${port}/youtube-callback`;
   const params = new URLSearchParams({
@@ -655,24 +712,30 @@ ipcMain.handle('youtube-oauth-start', async (_e, { clientId, scope, state, codeC
   // Auto-timeout after 5 minutes so we don't leak the server forever
   const timeout = setTimeout(() => {
     try { server.close(); } catch {}
+    if (activeOauth?.server === server) {
+      activeOauth.reject(new Error('timed out'));
+      activeOauth = null;
+    }
   }, 5 * 60 * 1000);
 
   try {
     const code = await codePromise;
     clearTimeout(timeout);
-    activeOauthServer = null;
+    activeOauth = null;
     return { code, redirectUri };
   } catch (err) {
     clearTimeout(timeout);
-    activeOauthServer = null;
+    try { server.close(); } catch {}
+    activeOauth = null;
     throw err;
   }
 });
 
 ipcMain.handle('youtube-oauth-cancel', () => {
-  if (activeOauthServer) {
-    try { activeOauthServer.close(); } catch {}
-    activeOauthServer = null;
+  if (activeOauth) {
+    activeOauth.reject(new Error('cancelled'));
+    try { activeOauth.server.close(); } catch {}
+    activeOauth = null;
   }
 });
 
@@ -687,8 +750,8 @@ app.whenReady().then(() => {
     try {
       const u = new URL(request.url);
       const filename = decodeURIComponent(u.pathname.replace(/^\//, ''));
-      if (!filename || filename.includes('..') || filename.includes('\\') || filename.includes('/')) {
-        return new Response('forbidden', { status: 403 });
+      if (!filename || filename.includes('..') || filename.includes('\\')) {
+        return new Response('forbidden', { status: 403, headers: CORS_HEADERS });
       }
       const filePath = path.join(userAudioDir(), filename);
       const stat = await fs.promises.stat(filePath);
@@ -719,6 +782,7 @@ app.whenReady().then(() => {
             'Accept-Ranges': 'bytes',
             'Content-Length': String(end - start + 1),
             'Content-Type': contentType,
+            ...CORS_HEADERS,
           },
         });
       }
@@ -729,18 +793,19 @@ app.whenReady().then(() => {
           'Accept-Ranges': 'bytes',
           'Content-Length': String(total),
           'Content-Type': contentType,
+          ...CORS_HEADERS,
         },
       });
     } catch (err) {
       console.error('[cupid-local]', err.message);
-      return new Response('not found', { status: 404 });
+      return new Response('not found', { status: 404, headers: CORS_HEADERS });
     }
   });
 
   protocol.handle('cupid-audio', async (request) => {
     try {
       const id = new URL(request.url).searchParams.get('id');
-      if (!id) return new Response('missing id', { status: 400 });
+      if (!id) return new Response('missing id', { status: 400, headers: CORS_HEADERS });
 
       const streamUrl = await resolveStreamUrl(id);
 
@@ -754,7 +819,9 @@ app.whenReady().then(() => {
 
       const upstream = await net.fetch(streamUrl, { headers });
       const respHeaders = new Headers(upstream.headers);
-      respHeaders.set('Content-Type', 'audio/mp4');
+      respHeaders.set('Access-Control-Allow-Origin', '*');
+      // Pass through the real type — bestaudio isn't always m4a (e.g. webm/opus)
+      if (!respHeaders.get('content-type')) respHeaders.set('Content-Type', 'audio/mp4');
       return new Response(upstream.body, {
         status: upstream.status,
         statusText: upstream.statusText,
@@ -762,7 +829,7 @@ app.whenReady().then(() => {
       });
     } catch (err) {
       console.error('[cupid-audio]', err.message);
-      return new Response('failed', { status: 502 });
+      return new Response('failed', { status: 502, headers: CORS_HEADERS });
     }
   });
 

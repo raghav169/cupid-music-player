@@ -65,11 +65,11 @@ The local playlist is driven by a single file, `playlist.json`, that lives next 
 ### Where the audio folder lives
 
 - **Running from source (dev):** `audio/` in the project root.
-- **Installed app (macOS):** `~/Library/Application Support/Cupid Player/audio/`
-- **Installed app (Windows):** `%APPDATA%\Cupid Player\audio\`
-- **Installed app (Linux):** `~/.config/Cupid Player/audio/`
+- **Installed app (macOS):** `~/Library/Application Support/cupid-player/audio/`
+- **Installed app (Windows):** `%APPDATA%\cupid-player\audio\`
+- **Installed app (Linux):** `~/.config/cupid-player/audio/`
 
-On first launch, the installed app seeds this folder with the bundled defaults. After that it's yours to edit — the app never overwrites it.
+On launch, the installed app seeds any missing bundled files into this folder — it fills gaps (e.g. new `song photos/` art) but never overwrites your edits.
 
 ### Building your playlist
 

@@ -1,8 +1,8 @@
-import { useCallback, useRef, useEffect, useState } from 'react';
+import { useCallback, useRef, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import './App.css';
-import useAudioPlayer from './useAudioPlayer';
-import useSpotifyPlayer from './useSpotifyPlayer';
+import usePlayer from './usePlayer';
+import { createLocalAdapter, streamAdapter } from './audio/adapters.js';
 import useTheme from './useTheme';
 import { login as spotifyLogin, handleCallback, isLoggedIn as isSpotifyLoggedIn, logout as spotifyLogout } from './spotify/auth.js';
 import { fetchPlaylistTracks as fetchSpotifyTracks, fetchMyPlaylists as fetchSpotifyPlaylists } from './spotify/api.js';
@@ -82,15 +82,17 @@ function SettingsDropdown({ value, options, onChange }) {
     const onKey = (e) => {
       if (e.key === 'Escape') setOpen(false);
     };
+    const onScroll = () => setOpen(false);
     document.addEventListener('mousedown', onMouseDown);
     document.addEventListener('keydown', onKey);
     window.addEventListener('resize', updateRect);
     // Close on scroll anywhere — positions become stale fast
-    window.addEventListener('scroll', () => setOpen(false), true);
+    window.addEventListener('scroll', onScroll, true);
     return () => {
       document.removeEventListener('mousedown', onMouseDown);
       document.removeEventListener('keydown', onKey);
       window.removeEventListener('resize', updateRect);
+      window.removeEventListener('scroll', onScroll, true);
     };
   }, [open]);
 
@@ -230,9 +232,16 @@ export default function App() {
 
   useEffect(() => { loadLocalPlaylist(); }, [loadLocalPlaylist]);
 
-  const local = useAudioPlayer(localTracks, playMode, window.cupid?.getLocalAudioPath);
-  const streaming = useSpotifyPlayer(streamTracks, playMode);
-  const player = source === 'streaming' ? streaming : local;
+  const localAdapter = useMemo(
+    () => createLocalAdapter(window.cupid?.getLocalAudioPath),
+    [],
+  );
+  const isStreaming = source === 'streaming';
+  const player = usePlayer(
+    isStreaming ? streamTracks : localTracks,
+    playMode,
+    isStreaming ? streamAdapter : localAdapter,
+  );
 
   const {
     track,
@@ -248,6 +257,7 @@ export default function App() {
     setVolume,
     muted,
     toggleMute,
+    loading: trackLoading,
   } = player;
 
   const cyclePlayMode = useCallback(() => {
@@ -356,6 +366,12 @@ export default function App() {
   }, []);
 
   const { theme, toggleTheme, assets } = useTheme();
+
+  // ?mode=full forces full layout — handy for browser preview/QA
+  const [winMode, setWinMode] = useState(() =>
+    new URLSearchParams(window.location.search).get('mode') === 'full' ? 'full' : 'compact'
+  ); // 'compact' | 'full'
+  useEffect(() => window.cupid?.onModeChange?.(setWinMode), []);
 
   const [recordFrame, setRecordFrame] = useState(0);
   const [needleFrame, setNeedleFrame] = useState(0);
@@ -467,7 +483,8 @@ export default function App() {
   const resizeBR = useResize('bottom-right');
 
   return (
-    <div className={`player ${theme === 'blue' ? 'theme-blue' : ''}`}>
+    <div className={`app-shell ${winMode === 'full' ? 'mode-full' : ''}`}>
+    <div className={`player ${theme === 'blue' ? 'theme-blue' : ''} ${winMode === 'full' ? 'mode-full' : ''}`}>
       {/* Base frame */}
       <img src={assets.frame} className="layer" alt="" draggable={false} />
 
@@ -520,7 +537,7 @@ export default function App() {
         alt=""
         draggable={false}
         style={{
-          transform: `translateX(calc(-3 / 306 * 100vw + ${(hoverProgress ?? progress) * (226 / 512) * 171.9}vw))`,
+          transform: `translateX(calc(-3 / 306 * var(--w) + ${(hoverProgress ?? progress) * (226 / 512) * 1.719} * var(--w)))`,
         }}
       />
 
@@ -585,7 +602,7 @@ export default function App() {
       <div className="now-playing">
         <div className="track-info">
           <div className="now-playing-label">
-            now playing...
+            {trackLoading ? 'loading...' : 'now playing...'}
           </div>
           <MarqueeText className="track-title" text={track.title} />
           <div className="track-artist">by {track.artist}</div>
@@ -674,7 +691,7 @@ export default function App() {
 
       {/* Window control click targets */}
       <div className="btn btn-minimize" onClick={() => window.cupid?.minimize()} />
-      <div className="btn btn-window" onClick={() => window.cupid?.maximize()} />
+      <div className="btn btn-window" onClick={() => window.cupid?.toggleMode?.()} />
       <div className="btn btn-exit" onClick={() => window.cupid?.close()} />
 
       {/* Settings button */}
@@ -728,12 +745,20 @@ export default function App() {
             />
 
             {musicService === 'local' && (
-              <button
-                className="settings-theme-btn"
-                onClick={loadLocalPlaylist}
-              >
-                reload
-              </button>
+              <div className="settings-theme-row">
+                <button
+                  className="settings-theme-btn"
+                  onClick={loadLocalPlaylist}
+                >
+                  reload
+                </button>
+                <button
+                  className="settings-theme-btn"
+                  onClick={() => window.cupid?.openMusicFolder?.()}
+                >
+                  open folder
+                </button>
+              </div>
             )}
 
             {musicService === 'spotify' && (
@@ -815,25 +840,38 @@ export default function App() {
             {musicService === 'youtube' && (
               isYouTubeConfigured() ? (
                 !youtubeConnected ? (
-                  <button
-                    className={`settings-theme-btn ${youtubeLoggingIn ? 'disabled' : ''}`}
-                    disabled={youtubeLoggingIn}
-                    onClick={async () => {
-                      setYoutubeLoggingIn(true);
-                      setSettingsError(null);
-                      try {
-                        await youtubeLogin();
-                        setYoutubeConnected(true);
-                        loadYoutubePlaylists();
-                      } catch (err) {
-                        setSettingsError(err.message);
-                      } finally {
-                        setYoutubeLoggingIn(false);
-                      }
-                    }}
-                  >
-                    {youtubeLoggingIn ? 'waiting for browser...' : 'log in with google'}
-                  </button>
+                  <div className="settings-theme-row">
+                    <button
+                      className={`settings-theme-btn ${youtubeLoggingIn ? 'disabled' : ''}`}
+                      disabled={youtubeLoggingIn}
+                      onClick={async () => {
+                        setYoutubeLoggingIn(true);
+                        setSettingsError(null);
+                        try {
+                          await youtubeLogin();
+                          setYoutubeConnected(true);
+                          loadYoutubePlaylists();
+                        } catch (err) {
+                          if (err.message !== 'cancelled') setSettingsError(err.message);
+                        } finally {
+                          setYoutubeLoggingIn(false);
+                        }
+                      }}
+                    >
+                      {youtubeLoggingIn ? 'waiting for browser...' : 'log in with google'}
+                    </button>
+                    {youtubeLoggingIn && (
+                      <button
+                        className="settings-theme-btn"
+                        onClick={() => {
+                          cancelYouTubeLogin();
+                          setYoutubeLoggingIn(false);
+                        }}
+                      >
+                        cancel
+                      </button>
+                    )}
+                  </div>
                 ) : (
                   <>
                     <PlaylistList
@@ -891,6 +929,7 @@ export default function App() {
           </div>
         </div>
       )}
+    </div>
     </div>
   );
 }

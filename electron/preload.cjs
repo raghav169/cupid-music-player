@@ -6,6 +6,12 @@ contextBridge.exposeInMainWorld('cupid', {
   maximize: () => ipcRenderer.send('window-maximize'),
   close: () => ipcRenderer.send('window-close'),
   resize: (data) => ipcRenderer.send('window-resize', data),
+  toggleMode: () => ipcRenderer.send('window-toggle-mode'),
+  onModeChange: (cb) => {
+    const listener = (_e, mode) => cb(mode);
+    ipcRenderer.on('window-mode-changed', listener);
+    return () => ipcRenderer.removeListener('window-mode-changed', listener);
+  },
   openExternal: (url) => ipcRenderer.send('open-external', url),
   setTheme: (theme) => ipcRenderer.send('set-theme', theme),
   getStreamUrl: (title, artist) => ipcRenderer.invoke('get-stream-url', title, artist),
