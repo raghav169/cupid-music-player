@@ -6,6 +6,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { Readable } = require('node:stream');
 const http = require('node:http');
+const os = require('node:os');
 
 const fs = require('node:fs');
 const jwt = require('jsonwebtoken');
@@ -749,6 +750,49 @@ ipcMain.handle('get-lyrics', async (_e, track) => {
   } catch { /* offline or no match */ }
 
   return null;
+});
+
+// ── Listen Together (LAN) ─────────────────────────────────
+// Host runs a ws server; guests' renderers connect directly via
+// WebSocket('ws://host:port'). The host renderer is authoritative — it
+// pushes state through 'room-broadcast' and we relay to every client.
+let roomWss = null;
+
+ipcMain.handle('room-host', async () => {
+  if (roomWss) return roomWss.address().port;
+  const { WebSocketServer } = require('ws');
+  roomWss = new WebSocketServer({ host: '0.0.0.0', port: 0 });
+  await new Promise((resolve, reject) => {
+    roomWss.once('listening', resolve);
+    roomWss.once('error', reject);
+  });
+  return roomWss.address().port;
+});
+
+ipcMain.handle('room-stop', async () => {
+  if (!roomWss) return;
+  const wss = roomWss;
+  roomWss = null;
+  await new Promise((res) => wss.close(res));
+});
+
+ipcMain.on('room-broadcast', (_e, msg) => {
+  if (!roomWss) return;
+  const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
+  for (const c of roomWss.clients) {
+    if (c.readyState === 1) c.send(data);
+  }
+});
+
+ipcMain.handle('room-peer-count', () => roomWss?.clients.size ?? 0);
+
+ipcMain.handle('room-local-ip', () => {
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const n of list || []) {
+      if (n.family === 'IPv4' && !n.internal) return n.address;
+    }
+  }
+  return '127.0.0.1';
 });
 
 ipcMain.handle('get-stream-url-by-id', (_e, videoId) => {

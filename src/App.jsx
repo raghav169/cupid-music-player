@@ -11,6 +11,7 @@ import LyricsPanel from './LyricsPanel.jsx';
 import { parseLrc } from './lrc.js';
 import usePlaylists from './usePlaylists.js';
 import useStats from './useStats.js';
+import useRoom from './room/useRoom.js';
 import useTheme from './useTheme';
 import { login as spotifyLogin, handleCallback, isLoggedIn as isSpotifyLoggedIn, logout as spotifyLogout } from './spotify/auth.js';
 import { fetchPlaylistTracks as fetchSpotifyTracks, fetchMyPlaylists as fetchSpotifyPlaylists, searchTracks as searchSpotifyTracks } from './spotify/api.js';
@@ -220,6 +221,16 @@ export default function App() {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [track?.source, track?.title, track?.artist, track?.file]);
+
+  // ── Listen Together (LAN room) ────────────────────────────
+  const [roomJoinInput, setRoomJoinInput] = useState('');
+  const getPlayerState = useCallback(() => ({
+    track: playerRef.current.track,
+    currentTime: playerRef.current.currentTime,
+    isPlaying: playerRef.current.isPlaying,
+    duration: playerRef.current.duration,
+  }), []);
+  const room = useRoom({ getPlayerState, playerRef, playTrackList });
 
   // ── EQ ───────────────────────────────────────────────────
   const [eqGains, setEqGains] = useState(() => {
@@ -820,6 +831,17 @@ export default function App() {
             },
             onSelect: (id) => loadPlaylist(id, 'youtube'),
             onRefresh: () => loadYoutubePlaylists(),
+          }}
+          room={{
+            role: room.role,
+            address: room.address,
+            peerCount: room.peerCount,
+            error: room.error,
+            joinInput: roomJoinInput,
+            onJoinInput: setRoomJoinInput,
+            onHost: room.host,
+            onJoin: room.join,
+            onLeave: room.leave,
           }}
           error={settingsError}
           loadingPlaylists={loadingPlaylists}

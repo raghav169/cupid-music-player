@@ -121,6 +121,7 @@ export default function SettingsPanel({
   musicService, onMusicService,
   onReloadLocal,
   spotify, apple, youtube,
+  room,
   error,
   loadingPlaylists, loadingPlaylist,
 }) {
@@ -303,6 +304,47 @@ export default function SettingsPanel({
               </button>
             </>
           )
+        )}
+
+        {room && (
+          <>
+            <div className="settings-label">listen together</div>
+            {room.role ? (
+              <div className="settings-theme-row">
+                <span className="settings-label">
+                  {room.role === 'host' ? `hosting — ${room.address}` : `in room — ${room.address}`}
+                  {room.role === 'host' && room.peerCount > 0 ? ` (${room.peerCount} listening)` : ''}
+                </span>
+                <button className="settings-theme-btn" onClick={room.onLeave}>leave</button>
+              </div>
+            ) : (
+              <>
+                <button className="settings-theme-btn" onClick={room.onHost}>
+                  host a room
+                </button>
+                <div className="settings-theme-row">
+                  <input
+                    className="settings-input"
+                    type="text"
+                    placeholder="host ip:port"
+                    value={room.joinInput}
+                    onChange={(e) => room.onJoinInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && room.joinInput.trim()) room.onJoin(room.joinInput);
+                    }}
+                  />
+                  <button
+                    className="settings-theme-btn"
+                    disabled={!room.joinInput.trim()}
+                    onClick={() => room.onJoin(room.joinInput)}
+                  >
+                    join
+                  </button>
+                </div>
+                {room.error && <div className="settings-error">{room.error}</div>}
+              </>
+            )}
+          </>
         )}
 
         {error && <div className="settings-error">{error}</div>}

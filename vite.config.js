@@ -10,7 +10,7 @@ const CSP = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: https:",
   "media-src 'self' cupid-local: cupid-audio:",
-  "connect-src 'self' https: wss:",
+  "connect-src 'self' https: wss: ws:", // ws: for Listen Together LAN rooms
   "font-src 'self' data:",
   "frame-src https://*.apple.com https://*.music.apple.com",
 ].join('; ');
