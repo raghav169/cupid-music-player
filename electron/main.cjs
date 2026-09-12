@@ -696,6 +696,61 @@ ipcMain.handle('youtube-search', async (_e, query) => {
   }
 });
 
+// ── Lyrics ────────────────────────────────────────────────
+// Lookup order for local files: <song>.lrc sidecar → embedded (USLT/SYLT
+// via music-metadata) → lrclib.net. Streams go straight to lrclib.net.
+ipcMain.handle('get-lyrics', async (_e, track) => {
+  if (!track?.title) return null;
+
+  if (track.file) {
+    const file = resolveLocalAudioFile(track.file);
+    if (file) {
+      // Sidecar .lrc next to the audio file
+      const lrcPath = file.replace(/\.[^.]+$/, '.lrc');
+      try {
+        return { synced: await fs.promises.readFile(lrcPath, 'utf8'), plain: null };
+      } catch { /* no sidecar */ }
+
+      // Embedded lyrics
+      try {
+        const { parseFile } = await import('music-metadata');
+        const meta = await parseFile(file);
+        const lyr = meta.common.lyrics?.[0];
+        if (lyr?.syncText?.length) {
+          // SYLT-style: [{ text, timestamp(ms) }] → convert to LRC-ish lines
+          return {
+            synced: null,
+            plain: null,
+            syncText: lyr.syncText.map((l) => ({ time: l.timestamp / 1000, text: l.text })),
+          };
+        }
+        if (lyr?.text) return { synced: null, plain: lyr.text };
+      } catch { /* no embedded lyrics */ }
+    }
+  }
+
+  // lrclib.net — free synced-lyrics DB, no auth
+  try {
+    const params = new URLSearchParams({
+      track_name: track.title,
+      artist_name: track.artist || '',
+    });
+    if (track.durationMs) params.set('duration', String(Math.round(track.durationMs / 1000)));
+    if (track.album) params.set('album_name', track.album);
+    const res = await fetch(`https://lrclib.net/api/get?${params}`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.syncedLyrics || data.plainLyrics) {
+        return { synced: data.syncedLyrics || null, plain: data.plainLyrics || null };
+      }
+    }
+  } catch { /* offline or no match */ }
+
+  return null;
+});
+
 ipcMain.handle('get-stream-url-by-id', (_e, videoId) => {
   return streamUrlForVideoId(videoId);
 });

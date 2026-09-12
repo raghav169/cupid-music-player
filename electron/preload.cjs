@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('cupid', {
   savePlaylists: (playlists) => ipcRenderer.invoke('playlists-save', playlists),
   getEmbeddedArt: (filename) => ipcRenderer.invoke('get-embedded-art', filename),
   youtubeSearch: (query) => ipcRenderer.invoke('youtube-search', query),
+  getLyrics: (track) => ipcRenderer.invoke('get-lyrics', track),
   getLocalAudioPath: (filename) => ipcRenderer.invoke('get-local-audio-path', filename),
   openMusicFolder: () => ipcRenderer.invoke('open-music-folder'),
   youtubeFetchPlaylist: (url) => ipcRenderer.invoke('youtube-fetch-playlist', url),

@@ -7,6 +7,8 @@ import Visualizer from './Visualizer.jsx';
 import SettingsPanel from './SettingsPanel.jsx';
 import LibraryPanel from './LibraryPanel.jsx';
 import SearchPanel from './SearchPanel.jsx';
+import LyricsPanel from './LyricsPanel.jsx';
+import { parseLrc } from './lrc.js';
 import usePlaylists from './usePlaylists.js';
 import useStats from './useStats.js';
 import useTheme from './useTheme';
@@ -203,6 +205,21 @@ export default function App() {
       youtube: (yt.value || []).map((t) => ({ ...t, source: 'youtube' })),
     };
   }, [localTracks, playlists, spotifyConnected, appleConnected]);
+
+  // ── Lyrics — fetched per track: .lrc sidecar → embedded → lrclib ──
+  const [lyrics, setLyrics] = useState(null); // { lines: [{time,text}], plain }
+  useEffect(() => {
+    setLyrics(null);
+    if (!track?.title || track.title === 'No track' || !window.cupid?.getLyrics) return;
+    let cancelled = false;
+    window.cupid.getLyrics(track).then((res) => {
+      if (cancelled || !res) return;
+      const lines = res.synced ? parseLrc(res.synced) : (res.syncText || []);
+      setLyrics({ lines, plain: res.plain });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [track?.source, track?.title, track?.artist, track?.file]);
 
   // ── EQ ───────────────────────────────────────────────────
   const [eqGains, setEqGains] = useState(() => {
@@ -811,12 +828,20 @@ export default function App() {
       )}
     </div>
     {winMode === 'full' && (
-      <SearchPanel
-        onSearch={searchAll}
-        onPlayTrack={playTrack}
-        playlists={playlists}
-        onAddToPlaylist={addToPlaylist}
-      />
+      <div className="side-stack">
+        <SearchPanel
+          onSearch={searchAll}
+          onPlayTrack={playTrack}
+          playlists={playlists}
+          onAddToPlaylist={addToPlaylist}
+        />
+        <LyricsPanel
+          lines={lyrics?.lines}
+          plain={lyrics?.plain}
+          currentTime={currentTime}
+          title={track?.title}
+        />
+      </div>
     )}
     </div>
   );

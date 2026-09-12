@@ -152,6 +152,57 @@
   flex-shrink: 0;
 }
 
+/* Right side stack: search on top, lyrics below */
+.side-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: 80vh;
+}
+
+.side-stack .side-panel {
+  max-height: none;
+}
+
+.lyrics-panel {
+  flex: 1;
+  min-height: 120px;
+}
+
+.lyrics-list {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  max-height: 32vh;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 30px 0; /* room to center first/last lines */
+}
+
+.lyrics-line {
+  font-size: 12px;
+  color: var(--color-secondary);
+  transition: color 0.15s;
+}
+
+.lyrics-line.past {
+  opacity: 0.5;
+}
+
+.lyrics-line.active {
+  color: var(--color-panel-text);
+  font-size: 13px;
+}
+
+.lyrics-plain {
+  font-size: 11px;
+  color: var(--color-panel-text);
+  white-space: pre-wrap;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  max-height: 32vh;
+}
+
 
 .layer {
   position: absolute;
