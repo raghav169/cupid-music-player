@@ -1,14 +1,40 @@
+.app-shell {
+  width: 100vw;
+  height: 100vh;
+  --color-title: #78364F;
+  --color-primary: #5a3a4a;
+  --color-secondary: #8a6a7a;
+  --color-panel-text: #F6CFC8;
+}
+
+.app-shell.theme-blue {
+  --color-title: #063940;
+  --color-primary: #063940;
+  --color-secondary: #1a6b6b;
+  --color-panel-text: #C8D3F6;
+}
+
+/* Full mode: dimmed backdrop, side panels flanking the player column */
+.app-shell.mode-full {
+  background: rgba(8, 6, 10, 0.72);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 32px;
+}
+
 .player {
   position: relative;
+  /* --w is one "logical viewport width": the width of the 306-unit frame.
+     Compact mode = the window IS the frame. Full mode = frame column is
+     centered at full screen height (306:497 aspect). */
+  --w: 100vw;
   width: var(--w);
   height: 100vh;
   overflow: hidden;
   border-radius: calc(5 / 306 * var(--w)); /* match frame's pixel-art rounded corners */
   clip-path: inset(0 0 0 calc(3 / 306 * var(--w)));
-  --color-title: #78364F;
-  --color-primary: #5a3a4a;
-  --color-secondary: #8a6a7a;
-  --color-panel-text: #F6CFC8;
+  flex-shrink: 0;
 }
 
 .player.mode-full {
@@ -19,11 +45,111 @@
   display: none;
 }
 
-.player.theme-blue {
-  --color-title: #063940;
-  --color-primary: #063940;
-  --color-secondary: #1a6b6b;
-  --color-panel-text: #C8D3F6;
+/* ── Full-mode side panels (library / search) ────────────── */
+.side-panel {
+  width: 300px;
+  max-height: 80vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  background: rgba(18, 12, 16, 0.88);
+  border: 2px solid var(--color-secondary);
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-family: 'Rainyhearts', monospace;
+}
+
+.side-panel-title {
+  font-size: 16px;
+  color: var(--color-panel-text);
+  margin-bottom: 4px;
+}
+
+.side-label {
+  font-size: 11px;
+  color: var(--color-secondary);
+  filter: brightness(1.8);
+  margin-top: 6px;
+}
+
+.side-hint {
+  font-size: 10px;
+  color: var(--color-secondary);
+  opacity: 0.6;
+}
+
+.side-row {
+  display: flex;
+  gap: 4px;
+  align-items: stretch;
+}
+
+.side-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.side-item {
+  font-family: 'Rainyhearts', monospace;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.05);
+  border: none;
+  border-radius: 2px;
+  color: var(--color-panel-text);
+  padding: 4px 6px;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.side-item:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.side-item.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.side-dim {
+  color: var(--color-secondary);
+  font-size: 10px;
+}
+
+.settings-theme-btn.danger:hover {
+  background: #c44;
+  color: #fff;
+}
+
+.playlist-block {
+  display: flex;
+  flex-direction: column;
+}
+
+.playlist-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0 4px 10px;
+}
+
+.result-row .settings-dropdown {
+  width: 90px;
+  flex-shrink: 0;
+}
+
+.result-art {
+  width: 24px;
+  height: 24px;
+  object-fit: cover;
+  border-radius: 2px;
+  image-rendering: pixelated;
+  flex-shrink: 0;
 }
 
 

@@ -622,6 +622,80 @@ ipcMain.handle('open-music-folder', async () => {
   return dir;
 });
 
+// Resolve a relative filename inside the audio dir — shared safety check.
+function resolveLocalAudioFile(filename) {
+  if (typeof filename !== 'string' || !filename) return null;
+  const normalized = path.normalize(filename);
+  if (normalized.startsWith('..') || path.isAbsolute(normalized)) return null;
+  const base = isDev ? path.join(__dirname, '..', 'audio') : userAudioDir();
+  return path.join(base, normalized);
+}
+
+// ── User playlists ────────────────────────────────────────
+// Stored as a single JSON object: { "name": [track, ...] }
+function playlistsFile() {
+  return path.join(app.getPath('userData'), 'playlists.json');
+}
+
+ipcMain.handle('playlists-load', async () => {
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(playlistsFile(), 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+});
+
+ipcMain.handle('playlists-save', async (_e, playlists) => {
+  if (!playlists || typeof playlists !== 'object' || Array.isArray(playlists)) return false;
+  try {
+    await fs.promises.mkdir(app.getPath('userData'), { recursive: true });
+    await fs.promises.writeFile(playlistsFile(), JSON.stringify(playlists, null, 2));
+    return true;
+  } catch (err) {
+    console.warn('[playlists-save]', err.message);
+    return false;
+  }
+});
+
+// ── Embedded album art ────────────────────────────────────
+// music-metadata is ESM-only → dynamic import. Returns a data URL so the
+// renderer can use it directly as an <img> src.
+ipcMain.handle('get-embedded-art', async (_e, filename) => {
+  const file = resolveLocalAudioFile(filename);
+  if (!file) return null;
+  try {
+    const { parseFile } = await import('music-metadata');
+    const meta = await parseFile(file);
+    const pic = meta.common.picture?.[0];
+    if (!pic) return null;
+    return `data:${pic.format};base64,${Buffer.from(pic.data).toString('base64')}`;
+  } catch {
+    return null;
+  }
+});
+
+// ── YouTube search (unified search fan-out) ───────────────
+ipcMain.handle('youtube-search', async (_e, query) => {
+  if (typeof query !== 'string' || !query.trim()) return [];
+  try {
+    const yt = await getInnertube();
+    const res = await yt.music.search(query.trim(), { type: 'song' });
+    const items = res.songs?.contents || [];
+    return items.slice(0, 10).map((s) => ({
+      videoId: s.id,
+      title: s.title?.text ?? String(s.title ?? ''),
+      artist: (s.artists || []).map((a) => a.name).join(', '),
+      album: s.album?.name ?? '',
+      art: s.thumbnails?.[0]?.url ?? '',
+      durationMs: (s.duration?.seconds ?? 0) * 1000,
+    })).filter((s) => s.videoId && s.title);
+  } catch (err) {
+    console.warn('[youtube-search]', err.message);
+    return [];
+  }
+});
+
 ipcMain.handle('get-stream-url-by-id', (_e, videoId) => {
   return streamUrlForVideoId(videoId);
 });

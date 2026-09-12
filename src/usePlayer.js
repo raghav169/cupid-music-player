@@ -11,7 +11,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { AudioEngine } from './audio/AudioEngine.js';
 
-export default function usePlayer(tracks, playMode = 'normal', adapter) {
+export default function usePlayer(tracks, playMode = 'normal', adapter, startAtRef) {
   const engineRef = useRef(null);
   if (!engineRef.current) engineRef.current = new AudioEngine();
   const engine = engineRef.current;
@@ -24,15 +24,21 @@ export default function usePlayer(tracks, playMode = 'normal', adapter) {
   // Shared between prefetch, next(), and onEnded so we play what we warmed
   const nextIdxRef = useRef(null);
   const [trackIndex, setTrackIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
 
-  // Reset on playlist/source change — a stale index can be out of bounds
+  // Reset on playlist/source change — a stale index can be out of bounds.
+  // startAtRef can hold { index, autoPlay } to land on a specific track
+  // (e.g. clicking a song in a playlist) instead of resetting to 0.
   const prevTracksRef = useRef(tracks);
   if (prevTracksRef.current !== tracks) {
     prevTracksRef.current = tracks;
     nextIdxRef.current = null;
-    if (trackIndex !== 0) setTrackIndex(0);
+    const start = startAtRef?.current;
+    if (startAtRef) startAtRef.current = null;
+    const idx = start && start.index > 0 && start.index < tracks.length ? start.index : 0;
+    if (trackIndex !== idx) setTrackIndex(idx);
+    if (start?.autoPlay) setIsPlaying(true);
   }
-  const [isPlaying, setIsPlaying] = useState(false);
   // Ref so the async load effect sees the latest value when it resolves,
   // not the one captured when it started
   const isPlayingRef = useRef(false);

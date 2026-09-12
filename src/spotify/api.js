@@ -166,6 +166,32 @@ export async function fetchMyPlaylists() {
 }
 
 /**
+ * Search the Spotify catalog for tracks.
+ *
+ * @param {string} query
+ * @returns {Promise<Array<{ title, artist, art, uri, durationMs }>>}
+ */
+export async function searchTracks(query, limit = 10) {
+  const token = await getAccessToken();
+  if (!token) return [];
+
+  const res = await fetchWithRetry(
+    `${API_BASE}/search?q=${encodeURIComponent(query)}&type=track&limit=${limit}&market=from_token`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!res.ok) return [];
+
+  const data = await res.json();
+  return (data.tracks?.items || []).map((t) => ({
+    title: t.name,
+    artist: t.artists.map((a) => a.name).join(', '),
+    art: t.album?.images?.[0]?.url ?? null,
+    uri: t.uri,
+    durationMs: t.duration_ms,
+  }));
+}
+
+/**
  * Fetch basic playlist metadata (name, image).
  *
  * @param {string} playlistId

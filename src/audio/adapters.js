@@ -5,6 +5,8 @@
  */
 
 // Local files via the cupid-local:// protocol (or ./<file> in browser preview).
+// Falls back to embedded art (music-metadata in the main process) when
+// playlist.json has no `art` field.
 export function createLocalAdapter(getAudioPath) {
   return {
     async load(t) {
@@ -18,7 +20,25 @@ export function createLocalAdapter(getAudioPath) {
         src = `./${t.file}`;
         if (t.art) art = `./${t.art}`;
       }
+      if (!art && window.cupid?.getEmbeddedArt) {
+        try {
+          art = await window.cupid.getEmbeddedArt(t.file);
+        } catch { /* no embedded art */ }
+      }
       return src ? { src, art } : null;
+    },
+  };
+}
+
+// Mixed adapter for user playlists — picks local vs stream per track.
+export function createMixedAdapter(localAdapter) {
+  return {
+    load(t) {
+      return (t?.source === 'local' || t?.file) ? localAdapter.load(t) : streamAdapter.load(t);
+    },
+    prefetch(t) {
+      if (!t) return;
+      if (!(t.source === 'local' || t.file)) streamAdapter.prefetch(t);
     },
   };
 }

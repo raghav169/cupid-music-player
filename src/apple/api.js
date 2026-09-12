@@ -65,3 +65,28 @@ export async function fetchPlaylistTracks(playlistId) {
   }
   return tracks;
 }
+
+/**
+ * Search the Apple Music catalog for songs.
+ *
+ * @param {string} query
+ * @returns {Promise<Array<{ title, artist, art, uri, durationMs }>>}
+ */
+export async function searchCatalog(query, limit = 10) {
+  const mk = getMusicKit() || await initMusicKit();
+
+  const response = await mk.api.music(
+    `/v1/catalog/us/search`,
+    { term: query, types: 'songs', limit },
+  );
+
+  return (response.data.results?.songs?.data || []).map((s) => ({
+    title: s.attributes.name,
+    artist: s.attributes.artistName,
+    art: s.attributes.artwork
+      ? window.MusicKit.formatArtworkURL(s.attributes.artwork, 300, 300)
+      : null,
+    uri: `apple:track:${s.id}`,
+    durationMs: s.attributes.durationInMillis ?? 0,
+  }));
+}
