@@ -24,6 +24,9 @@ jobs:
       
       - name: Build Windows executable
         run: npm run package -- --win
+        env:
+          # electron-builder downloads winCodeSign/NSIS from GitHub releases
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
