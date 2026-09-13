@@ -59,13 +59,18 @@ jobs:
         with:
           name: windows-smoke-shots
           path: smoke-shots/
+          retention-days: 3
           if-no-files-found: warn
       
-      - name: Upload Windows build
+      # Only the NSIS installer — all of out/ is ~3 GB (bundled audio) and
+      # blows the private-repo artifact quota
+      - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: windows-build
-          path: out/
+          name: windows-installer
+          path: out/*.exe
+          retention-days: 7
+          if-no-files-found: error
 
   build-macos:
     runs-on: macos-latest
@@ -80,11 +85,7 @@ jobs:
       - name: Install dependencies
         run: npm install
       
+      # macOS builds locally on the dev machine — CI just validates it compiles.
+      # (No artifact: the .app is ~1.7 GB bundled-audio and blows the quota.)
       - name: Build macOS app
         run: npm run package -- --mac
-      
-      - name: Upload macOS build
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-build
-          path: out/
