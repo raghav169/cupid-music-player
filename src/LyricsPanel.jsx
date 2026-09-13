@@ -10,9 +10,12 @@ export default function LyricsPanel({ lines, plain, currentTime, title }) {
   const activeIdx = activeLyricIndex(lines || [], currentTime ?? 0);
 
   useEffect(() => {
-    const el = listRef.current?.children[activeIdx];
-    el?.scrollIntoView?.({ block: 'center', behavior: 'auto' });
-  }, [activeIdx]);
+    const list = listRef.current;
+    if (!list) return;
+    const el = list.children[activeIdx];
+    if (el) el.scrollIntoView?.({ block: 'center', behavior: 'auto' });
+    else list.scrollTop = 0;
+  }, [activeIdx, lines]);
 
   return (
     <div className="side-panel lyrics-panel">

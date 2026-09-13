@@ -22,12 +22,18 @@ export default function SearchPanel({ onSearch, onPlayTrack, playlists, onAddToP
   const seqRef = useRef(0);
 
   useEffect(() => {
-    if (!q.trim()) { setResults(null); return; }
+    if (!q.trim()) { setResults(null); setSearching(false); return; }
     setSearching(true);
     const seq = ++seqRef.current;
     const t = setTimeout(async () => {
-      const r = await onSearch(q.trim());
-      if (seq === seqRef.current) { setResults(r); setSearching(false); }
+      try {
+        const r = await onSearch(q.trim());
+        if (seq === seqRef.current) setResults(r);
+      } catch {
+        // Search failed — keep whatever results were already shown
+      } finally {
+        if (seq === seqRef.current) setSearching(false);
+      }
     }, 350);
     return () => clearTimeout(t);
   }, [q, onSearch]);

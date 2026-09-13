@@ -27,17 +27,23 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
   const [isPlaying, setIsPlaying] = useState(false);
 
   // Reset on playlist/source change — a stale index can be out of bounds.
-  // startAtRef can hold { index, autoPlay } to land on a specific track
-  // (e.g. clicking a song in a playlist) instead of resetting to 0.
+  // startAtRef can hold { index, autoPlay, seekTo, playing } to land on a
+  // specific track (e.g. clicking a song, or a room guest joining mid-song)
+  // instead of resetting to 0.
   const prevTracksRef = useRef(tracks);
+  const pendingStartRef = useRef(null);
   if (prevTracksRef.current !== tracks) {
     prevTracksRef.current = tracks;
     nextIdxRef.current = null;
     const start = startAtRef?.current;
     if (startAtRef) startAtRef.current = null;
+    pendingStartRef.current = start
+      ? { seekTo: start.seekTo, playing: start.playing ?? (start.autoPlay ? true : undefined) }
+      : null;
     const idx = start && start.index > 0 && start.index < tracks.length ? start.index : 0;
     if (trackIndex !== idx) setTrackIndex(idx);
-    if (start?.autoPlay) setIsPlaying(true);
+    if (start?.playing === false) setIsPlaying(false);
+    else if (start?.autoPlay) setIsPlaying(true);
   }
   // Ref so the async load effect sees the latest value when it resolves,
   // not the one captured when it started
@@ -49,8 +55,12 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
   const [loading, setLoading] = useState(false);
   const [resolvedArt, setResolvedArt] = useState(null);
   const [volume, setVolumeState] = useState(() => {
-    const saved = localStorage.getItem('cupid-volume');
-    return saved !== null ? parseFloat(saved) : 1;
+    try {
+      const saved = parseFloat(localStorage.getItem('cupid-volume'));
+      return Number.isFinite(saved) ? saved : 1;
+    } catch {
+      return 1;
+    }
   });
   const [muted, setMuted] = useState(false);
 
@@ -70,28 +80,58 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     const t = tracks[trackIndex];
     if (!t) {
       setResolvedArt(null);
+      setLoading(false);
+      setIsPlaying(false);
+      audio.removeAttribute('src');
+      audio.load();
       return;
     }
 
     let cancelled = false;
     setLoading(true);
+    setResolvedArt(null);
 
     (async () => {
       try {
         const res = await adapter.load(t);
         if (cancelled) return;
         setResolvedArt(res?.art ?? null);
-        if (!res?.src) return;
+        if (!res?.src) throw new Error('no playable source');
         // setting src triggers loading; an explicit audio.load() would reset it
         audio.src = res.src;
         setProgress(0);
         setCurrentTime(0);
         setDuration(0);
-        if (isPlayingRef.current) {
+        const pending = pendingStartRef.current;
+        pendingStartRef.current = null;
+        // Room guests join mid-song — seek once metadata lands (setting
+        // currentTime before then gets clamped to 0)
+        if (pending?.seekTo > 0) {
+          const onMeta = () => {
+            try { audio.currentTime = pending.seekTo; } catch { /* not seekable yet */ }
+            setCurrentTime(pending.seekTo);
+            setProgress(audio.duration ? pending.seekTo / audio.duration : 0);
+          };
+          if (audio.readyState >= 1) onMeta();
+          else audio.addEventListener('loadedmetadata', onMeta, { once: true });
+        }
+        const wantPlay = pending?.playing ?? isPlayingRef.current;
+        if (wantPlay) {
           engine.play().catch(() => {});
+        } else {
+          audio.pause();
         }
       } catch (err) {
+        if (cancelled) return;
         console.error('Failed to load track:', err.message);
+        // Unload fully — the previous track must not keep sounding
+        // under the new title
+        audio.removeAttribute('src');
+        audio.load();
+        setIsPlaying(false);
+        setProgress(0);
+        setCurrentTime(0);
+        setDuration(0);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -149,7 +189,10 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     };
 
     const onEnded = () => {
-      if (playModeRef.current === 'repeat') {
+      // Single-track queues wrap to themselves — restarting is the
+      // only way to keep playing (setTrackIndex to the same index
+      // wouldn't reload the element)
+      if (playModeRef.current === 'repeat' || tracks.length === 1) {
         audio.currentTime = 0;
         engine.play().catch(() => {});
         return;
@@ -185,13 +228,21 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     if (isPlaying) {
       engine.pause();
       setIsPlaying(false);
-    } else {
+    } else if (tracks[trackIndex]) {
       engine.play().catch(() => {});
       setIsPlaying(true);
     }
-  }, [isPlaying, engine]);
+  }, [isPlaying, engine, tracks, trackIndex]);
 
   const next = useCallback(() => {
+    if (tracks.length === 0) return;
+    if (tracks.length === 1) {
+      // The queue wraps to itself — restart the track
+      audio.currentTime = 0;
+      engine.play().catch(() => {});
+      setIsPlaying(true);
+      return;
+    }
     setTrackIndex((prev) => {
       if (tracks.length === 0) return 0;
       // Prefer the precomputed next (matches what prefetch warmed)
@@ -206,19 +257,21 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       return (prev + 1) % tracks.length;
     });
     setIsPlaying(true);
-  }, [tracks.length]);
+  }, [tracks.length, audio, engine]);
 
   const prev = useCallback(() => {
-    if (audio.currentTime > 3) {
+    if (tracks.length === 0) return;
+    if (audio.currentTime > 3 || tracks.length === 1) {
       audio.currentTime = 0;
+      // Play explicitly — the track-index effect can't fire when the
+      // index didn't change, so a paused track would sit silently
+      // rewound while the UI reports "playing"
+      engine.play().catch(() => {});
     } else {
-      setTrackIndex((p) => {
-        if (tracks.length === 0) return 0;
-        return (p - 1 + tracks.length) % tracks.length;
-      });
+      setTrackIndex((p) => (p - 1 + tracks.length) % tracks.length);
     }
     setIsPlaying(true);
-  }, [tracks.length, audio]);
+  }, [tracks.length, audio, engine]);
 
   const seek = useCallback((fraction) => {
     if (audio.duration) {
@@ -230,7 +283,7 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     const clamped = Math.max(0, Math.min(1, v));
     setVolumeState(clamped);
     audio.volume = clamped;
-    localStorage.setItem('cupid-volume', clamped);
+    try { localStorage.setItem('cupid-volume', clamped); } catch { /* ignore */ }
     if (clamped > 0) setMuted(false);
   }, [audio]);
 

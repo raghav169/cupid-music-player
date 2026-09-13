@@ -146,16 +146,19 @@ export default function App() {
   const mixedAdapter = useMemo(() => createMixedAdapter(localAdapter), [localAdapter]);
   // A user playlist / search result overrides the source track list entirely
   const [queue, setQueue] = useState(null);
-  const startAtRef = useRef(null); // { index, autoPlay } consumed by usePlayer
+  const startAtRef = useRef(null); // { index, autoPlay, seekTo, playing } consumed by usePlayer
   const isStreaming = source === 'streaming';
   const activeTracks = queue ?? (isStreaming ? streamTracks : localTracks);
   const activeAdapter = queue ? mixedAdapter : (isStreaming ? streamAdapter : localAdapter);
   const player = usePlayer(activeTracks, playMode, activeAdapter, startAtRef);
 
-  // Play a track list (playlist/search result), starting at `index`
-  const playTrackList = useCallback((tracks, index = 0) => {
-    startAtRef.current = { index, autoPlay: true };
-    setQueue(tracks);
+  // Play a track list (playlist/search result), starting at `index`.
+  // opts: { seekTo (s), playing (bool) } — room guests join mid-song
+  const playTrackList = useCallback((tracks, index = 0, opts = {}) => {
+    startAtRef.current = { index, autoPlay: true, ...opts };
+    // React bails when re-queuing the identical array, which would leave
+    // startAtRef unconsumed — copy so usePlayer still sees a change
+    setQueue((q) => (q === tracks ? tracks.slice() : tracks));
   }, []);
   const playTrack = useCallback((t) => playTrackList([t], 0), [playTrackList]);
 
@@ -185,9 +188,9 @@ export default function App() {
   const { recents, recordPlay } = useStats();
 
   useEffect(() => {
-    if (track?.title && track.title !== 'No track') recordPlay(track);
+    if (isPlaying && track?.title && track.title !== 'No track') recordPlay(track);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [track?.source, track?.title, track?.artist]);
+  }, [isPlaying, track?.source, track?.title, track?.artist]);
 
   const searchAll = useCallback(async (q) => {
     const ql = q.toLowerCase();
@@ -227,19 +230,33 @@ export default function App() {
 
   // ── Listen Together (LAN room) ────────────────────────────
   const [roomJoinInput, setRoomJoinInput] = useState('');
+  // Read the audio element directly for position — the React currentTime
+  // state only updates on timeupdate (~4Hz), which would systematically
+  // under-report the host position to room guests by up to ~250ms
   const getPlayerState = useCallback(() => ({
     track: playerRef.current.track,
-    currentTime: playerRef.current.currentTime,
+    currentTime: playerRef.current.engine?.audio?.currentTime ?? playerRef.current.currentTime,
     isPlaying: playerRef.current.isPlaying,
     duration: playerRef.current.duration,
   }), []);
   const room = useRoom({ getPlayerState, playerRef, playTrackList });
 
   // In a room as guest, transport controls forward to the host instead
-  const doTogglePlay = () => room.role === 'guest' ? room.command('toggle') : togglePlay();
+  // Guests mirror the host's state, so their local isPlaying ≈ host's —
+  // send idempotent play/pause instead of a blind toggle that can invert
+  const doTogglePlay = () => room.role === 'guest' ? room.command(isPlaying ? 'pause' : 'play') : togglePlay();
   const doNext = () => room.role === 'guest' ? room.command('next') : next();
   const doPrev = () => room.role === 'guest' ? room.command('prev') : prev();
-  const doSeek = (pct) => room.role === 'guest' ? room.command('seek', { fraction: pct }) : seek(pct);
+  // Tag seeks with the track so the host can drop a stale one
+  const doSeek = (pct) => room.role === 'guest'
+    ? room.command('seek', { fraction: pct, track })
+    : seek(pct);
+  // Guests can't change their own queue — a clicked song goes to the host
+  const playTrackListUi = useCallback((tracks, index = 0) => {
+    if (room.role === 'guest') { room.command('playTrack', { track: tracks[index] }); return; }
+    playTrackList(tracks, index);
+  }, [room.role, room.command, playTrackList]);
+  const playTrackUi = useCallback((t) => playTrackListUi([t], 0), [playTrackListUi]);
 
   // ── EQ ───────────────────────────────────────────────────
   const [eqGains, setEqGains] = useState(() => {
@@ -408,7 +425,7 @@ export default function App() {
 
   const [recordFrame, setRecordFrame] = useState(0);
   const [needleFrame, setNeedleFrame] = useState(0);
-  const [isPink, setIsPink] = useState(theme === 'pink');
+  const [isPink, setIsPink] = useState(theme !== 'blue');
   const [swapping, setSwapping] = useState(false);
   const [needleLifted, setNeedleLifted] = useState(false);
   const [starHovered, setStarHovered] = useState(false);
@@ -416,6 +433,10 @@ export default function App() {
   const [dragging, setDragging] = useState(false);
   const [hoverProgress, setHoverProgress] = useState(null);
   const seekRef = useRef(null);
+
+  // mint/lavender use the pink asset family — keep the record color on the
+  // theme's family when the theme changes mid-session
+  useEffect(() => setIsPink(theme !== 'blue'), [theme]);
 
   const lastSeekPctRef = useRef(null);
   useEffect(() => {
@@ -430,7 +451,7 @@ export default function App() {
     };
     const onMouseUp = () => {
       if (room.role === 'guest' && lastSeekPctRef.current != null) {
-        room.command('seek', { fraction: lastSeekPctRef.current });
+        room.command('seek', { fraction: lastSeekPctRef.current, track });
       }
       lastSeekPctRef.current = null;
       setDragging(false);
@@ -443,7 +464,7 @@ export default function App() {
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     };
-  }, [dragging, seek, room.role, room.command]);
+  }, [dragging, seek, room.role, room.command, track]);
 
   useEffect(() => {
     if (!volumeDragging) return;
@@ -538,7 +559,7 @@ export default function App() {
         playlists={playlists}
         recents={recents}
         currentTrack={track}
-        onPlayTracks={playTrackList}
+        onPlayTracks={playTrackListUi}
         onAddCurrentTo={addToPlaylist}
         onCreatePlaylist={createPlaylist}
         onDeletePlaylist={deletePlaylist}
@@ -880,7 +901,7 @@ export default function App() {
       <div className="side-stack">
         <SearchPanel
           onSearch={searchAll}
-          onPlayTrack={playTrack}
+          onPlayTrack={playTrackUi}
           playlists={playlists}
           onAddToPlaylist={addToPlaylist}
         />

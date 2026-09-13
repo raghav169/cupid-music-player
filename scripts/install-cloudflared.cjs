@@ -36,14 +36,17 @@ function httpsGet(url, accept = 'application/octet-stream') {
     const opts = {
       headers: { 'User-Agent': 'cupid-player-install-script', 'Accept': accept },
     };
-    https.get(url, opts, (res) => {
-      if (res.statusCode === 301 || res.statusCode === 302) {
+    const req = https.get(url, opts, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         httpsGet(res.headers.location, accept).then(resolve, reject);
         return;
       }
       resolve(res);
-    }).on('error', reject);
+    });
+    // A stalled connection must not hang `npm install` forever.
+    req.setTimeout(60000, () => req.destroy(new Error('request timed out')));
+    req.on('error', reject);
   });
 }
 
@@ -52,14 +55,22 @@ function download(url, dest) {
     try {
       const res = await httpsGet(url);
       if (res.statusCode !== 200) {
+        res.resume();
         reject(new Error(`HTTP ${res.statusCode} from ${url}`));
         return;
       }
       const tmp = `${dest}.partial`;
       const file = fs.createWriteStream(tmp);
       res.pipe(file);
+      // Response stream errors don't hit file.on('error') — without this the
+      // error is unhandled (crash) and the promise never settles (hang).
+      res.on('error', (err) => {
+        file.destroy();
+        try { fs.unlinkSync(tmp); } catch {}
+        reject(err);
+      });
       file.on('finish', () => file.close(() => { fs.renameSync(tmp, dest); resolve(); }));
-      file.on('error', (err) => { try { fs.unlinkSync(tmp); } catch {} reject(err); });
+      file.on('error', (err) => { res.destroy(); try { fs.unlinkSync(tmp); } catch {} reject(err); });
     } catch (err) {
       reject(err);
     }

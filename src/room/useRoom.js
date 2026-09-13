@@ -1,7 +1,13 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { computeGuestActions } from './sync.js';
+import { computeGuestActions, sameTrack } from './sync.js';
 
 const BROADCAST_MS = 2000;
+
+// A track is only meaningful to broadcast if a guest could actually load
+// it — the 'No track' placeholder (empty file/uri, empty artist) would make
+// a guest search YouTube for "No track" and play a random song.
+const isPlayable = (t) =>
+  !!(t && (t.videoId || t.uri || t.file || (t.title && t.artist)));
 
 // Normalize a room address: bare trycloudflare host / https URL → wss;
 // ip:port → ws (LAN).
@@ -31,6 +37,9 @@ export default function useRoom({ getPlayerState, playerRef, playTrackList }) {
   const broadcastTimer = useRef(null);
   const cmdUnsubRef = useRef(null);
   const joinCancelRef = useRef(null);
+  // Min observed (guestNow - hostSentAt) ≈ clock skew + min transit — a
+  // stable elapsed-time estimate immune to per-message jitter
+  const minDeltaRef = useRef(null);
 
   const leave = useCallback(() => {
     joinCancelRef.current?.();
@@ -55,10 +64,13 @@ export default function useRoom({ getPlayerState, playerRef, playTrackList }) {
 
       const push = () => {
         const s = getPlayerState();
-        if (!s?.track) return;
+        if (!isPlayable(s?.track)) return;
         window.cupid.roomBroadcast({
           type: 'state',
-          track: s.track,
+          // art can be a multi-MB data URL (embedded art) or a
+          // cupid-local:// URL that only resolves on this machine —
+          // only forward real remote art
+          track: { ...s.track, art: s.track.art?.startsWith('http') ? s.track.art : null },
           position: s.currentTime,
           isPlaying: s.isPlaying,
           sentAt: Date.now(),
@@ -75,13 +87,20 @@ export default function useRoom({ getPlayerState, playerRef, playTrackList }) {
           case 'toggle': p.togglePlay(); break;
           case 'play': if (!s.isPlaying) p.togglePlay(); break;
           case 'pause': if (s.isPlaying) p.togglePlay(); break;
-          case 'seek': if (typeof msg.fraction === 'number') p.seek(Math.max(0, Math.min(1, msg.fraction))); break;
+          case 'seek':
+            // Guests tag seeks with the track they think is playing —
+            // drop it if the host already moved on
+            if (msg.track && !sameTrack(msg.track, s.track)) return;
+            if (typeof msg.fraction === 'number') p.seek(Math.max(0, Math.min(1, msg.fraction)));
+            break;
           case 'next': p.next(); break;
           case 'prev': p.prev(); break;
-          case 'playTrack': if (msg.track) playTrackList([msg.track], 0); break;
+          case 'playTrack': if (isPlayable(msg.track)) playTrackList([msg.track], 0); break;
           default: return;
         }
-        push();
+        // React state hasn't re-rendered yet — a synchronous push would
+        // rebroadcast the pre-command position/isPlaying. Wait a beat.
+        setTimeout(push, 300);
       });
 
       push();
@@ -97,6 +116,11 @@ export default function useRoom({ getPlayerState, playerRef, playTrackList }) {
   const join = useCallback((addr) => {
     setError(null);
     if (!addr.trim()) return;
+    // Double-join would orphan the first attempt's socket + retry timers —
+    // cancel it before starting over
+    joinCancelRef.current?.();
+    if (wsRef.current) { wsRef.current.onclose = null; try { wsRef.current.close(); } catch {} wsRef.current = null; }
+    minDeltaRef.current = null;
     const url = roomWsUrl(addr);
     let attempts = 0;
     let wasConnected = false;
@@ -107,14 +131,20 @@ export default function useRoom({ getPlayerState, playerRef, playTrackList }) {
     const handleMessage = (ev) => {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
-      if (msg.type !== 'state') return;
+      if (msg.type !== 'state' || !isPlayable(msg.track)) return;
       const s = getPlayerState();
       const p = playerRef.current;
       if (!s || !p) return;
-      const a = computeGuestActions(msg, s);
+      const delta = Date.now() - msg.sentAt;
+      minDeltaRef.current = minDeltaRef.current == null ? delta : Math.min(minDeltaRef.current, delta);
+      // sentAt + minDelta ≈ host-time "now" with skew+min transit — more
+      // stable than per-message elapsed, which jitters over tunnels
+      const a = computeGuestActions(msg, s, msg.sentAt + minDeltaRef.current);
       if (a.loadTrack) {
-        playTrackList([a.loadTrack], 0);
-        return; // seek/play applied on the next state tick once loaded
+        // Carry the host's position/playing into the load — otherwise the
+        // guest autoplays from 0:00 until the next broadcast corrects it
+        playTrackList([a.loadTrack], 0, { seekTo: a.seek, playing: a.playing });
+        return;
       }
       if (a.seek != null && s.duration > 0) {
         p.seek(Math.max(0, Math.min(1, a.seek / s.duration)));

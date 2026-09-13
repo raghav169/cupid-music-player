@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { app, BrowserWindow, ipcMain, screen, shell, protocol, net } = require('electron');
-const { execFile } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
@@ -441,8 +441,10 @@ function createWindow() {
   };
   const onClose = () => win.close();
 
-  const onResize = (_e, { dx, dy, corner }) => {
+  const onResize = (_e, data) => {
     if (win.isDestroyed() || isFullMode) return;
+    const { dx, dy, corner } = data || {};
+    if (!Number.isFinite(dx) || !Number.isFinite(dy) || typeof corner !== 'string') return;
     const bounds = win.getBounds();
 
     const isRight = corner.includes('right');
@@ -486,7 +488,7 @@ function createWindow() {
           show: true,
           webPreferences: { nodeIntegration: false, contextIsolation: true },
         });
-        authWin.loadURL(url);
+        authWin.loadURL(url).catch(() => { if (!authWin.isDestroyed()) authWin.close(); });
         const handleAuthRedirect = (event, callbackUrl) => {
           if (callbackUrl.startsWith('http://127.0.0.1:5173/callback')) {
             event.preventDefault();
@@ -499,19 +501,20 @@ function createWindow() {
               fileUrl.search = url.search;
               target = fileUrl.href;
             }
-            win.loadURL(target);
-            authWin.close();
+            if (!win.isDestroyed()) win.loadURL(target).catch(() => {});
+            if (!authWin.isDestroyed()) authWin.close();
           }
         };
         authWin.webContents.on('will-redirect', handleAuthRedirect);
         authWin.webContents.on('will-navigate', handleAuthRedirect);
         return;
       }
-      shell.openExternal(url);
+      shell.openExternal(url).catch(() => {});
     }
   };
 
   const onSetTheme = (_e, theme) => {
+    if (typeof theme !== 'string' || /[/\\]|\.\./.test(theme)) return;
     const iconPath = path.join(__dirname, '..', 'assets', theme, 'favicon.png');
     if (process.platform === 'darwin' && app.dock) {
       app.dock.setIcon(iconPath);
@@ -544,7 +547,7 @@ function createWindow() {
       const parsed = new URL(url);
       if (parsed.hostname === 'accounts.spotify.com') {
         event.preventDefault();
-        shell.openExternal(url);
+        shell.openExternal(url).catch(() => {});
         return;
       }
       if (parsed.pathname === '/callback' && parsed.searchParams.has('code')) {
@@ -552,7 +555,7 @@ function createWindow() {
           event.preventDefault();
           const fileUrl = pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html'));
           fileUrl.search = parsed.search;
-          win.loadURL(fileUrl.href);
+          if (!win.isDestroyed()) win.loadURL(fileUrl.href).catch(() => {});
         }
       }
     } catch {
@@ -572,9 +575,9 @@ function createWindow() {
   }
 
   if (isDev) {
-    win.loadURL('http://127.0.0.1:5173');
+    win.loadURL('http://127.0.0.1:5173').catch(() => {});
   } else {
-    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html')).catch(() => {});
   }
 }
 
@@ -761,6 +764,7 @@ ipcMain.handle('get-lyrics', async (_e, track) => {
 let roomWss = null;
 let roomTunnelProc = null;
 let roomPublicUrl = null;
+let roomHostPromise = null;
 
 function getCloudflaredPath() {
   const binName = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
@@ -776,57 +780,86 @@ function getCloudflaredPath() {
 // Spawn `cloudflared tunnel --url http://127.0.0.1:<port>` and grab the
 // public https URL it prints. Resolves null on failure/timeout — the
 // caller then falls back to LAN ip:port.
+// (spawn, not execFile: execFile buffers output to maxBuffer and would kill
+// a long-lived tunnel once cloudflared's logs exceeded it.)
 function startRoomTunnel(localPort) {
   return new Promise((resolve) => {
     let resolved = false;
     const done = (url) => { if (!resolved) { resolved = true; resolve(url); } };
     try {
-      const proc = execFile(getCloudflaredPath(), [
+      const proc = spawn(getCloudflaredPath(), [
         'tunnel', '--url', `http://127.0.0.1:${localPort}`, '--no-autoupdate',
       ]);
       roomTunnelProc = proc;
+      // Spawn failure (missing binary) surfaces as 'error' — unhandled it
+      // throws and crashes the main process.
+      proc.on('error', () => done(null));
+      // Scan a rolling tail — the URL can split across output chunks.
+      let tail = '';
       const onData = (buf) => {
-        const m = buf.toString().match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+        tail = (tail + buf).slice(-500);
+        const m = tail.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
         if (m) done(m[0]);
       };
       proc.stdout.on('data', onData);
       proc.stderr.on('data', onData);
       proc.on('exit', () => done(null));
-      setTimeout(() => done(null), 15000);
+      setTimeout(() => { try { proc.kill(); } catch {} done(null); }, 15000);
     } catch {
       done(null);
     }
   });
 }
 
-ipcMain.handle('room-host', async () => {
+ipcMain.handle('room-host', () => {
   if (roomWss) {
     return { port: roomWss.address().port, publicUrl: roomPublicUrl };
   }
-  const { WebSocketServer } = require('ws');
-  roomWss = new WebSocketServer({ host: '0.0.0.0', port: 0 });
-  await new Promise((resolve, reject) => {
-    roomWss.once('listening', resolve);
-    roomWss.once('error', reject);
-  });
-  const port = roomWss.address().port;
+  // Dedupe concurrent starts — address() is null until 'listening' fires.
+  if (roomHostPromise) return roomHostPromise;
+  roomHostPromise = (async () => {
+    const { WebSocketServer } = require('ws');
+    // maxPayload caps frame size — the room is internet-reachable via the
+    // tunnel and unauthenticated, so don't let a stranger push 100 MiB frames
+    const wss = new WebSocketServer({ host: '0.0.0.0', port: 0, maxPayload: 16 * 1024 });
+    try {
+      await new Promise((resolve, reject) => {
+        wss.once('listening', resolve);
+        wss.once('error', reject);
+      });
+    } catch (err) {
+      try { wss.close(); } catch {}
+      throw err;
+    }
+    // Server/socket 'error' events with no listener throw — keep the app
+    // alive when a guest's connection dies abruptly.
+    wss.on('error', () => {});
+    roomWss = wss;
+    const port = wss.address().port;
 
-  // Guest commands → host renderer (anyone in the room can control)
-  roomWss.on('connection', (ws) => {
-    ws.on('message', (d) => {
-      try {
-        const msg = JSON.parse(d);
-        BrowserWindow.getAllWindows()[0]?.webContents.send('room-command', msg);
-      } catch { /* malformed message */ }
+    // Guest commands → host renderer (anyone in the room can control)
+    wss.on('connection', (ws) => {
+      ws.on('error', () => {});
+      ws.on('message', (d) => {
+        try {
+          const msg = JSON.parse(d);
+          BrowserWindow.getAllWindows()[0]?.webContents.send('room-command', msg);
+        } catch { /* malformed message */ }
+      });
     });
-  });
 
-  // Try to open a public tunnel so guests on other networks can join
-  roomPublicUrl = await startRoomTunnel(port);
-  return { port, publicUrl: roomPublicUrl };
+    // Try to open a public tunnel so guests on other networks can join
+    roomPublicUrl = await startRoomTunnel(port);
+    return { port, publicUrl: roomPublicUrl };
+  })().finally(() => { roomHostPromise = null; });
+  return roomHostPromise;
 });
 
 ipcMain.handle('room-stop', async () => {
+  // If a host is mid-startup, wait for it so the teardown below sticks.
+  if (roomHostPromise) {
+    try { await roomHostPromise; } catch {}
+  }
   if (roomTunnelProc) {
     try { roomTunnelProc.kill(); } catch {}
     roomTunnelProc = null;
@@ -835,6 +868,9 @@ ipcMain.handle('room-stop', async () => {
   if (!roomWss) return;
   const wss = roomWss;
   roomWss = null;
+  // wss.close() waits for connected clients — terminate them first or the
+  // callback (and this IPC) never fires while a guest is connected.
+  for (const c of wss.clients) c.terminate();
   await new Promise((res) => wss.close(res));
 });
 
@@ -862,6 +898,10 @@ ipcMain.handle('get-stream-url-by-id', (_e, videoId) => {
 });
 
 ipcMain.handle('youtube-fetch-playlist', async (_e, url) => {
+  // url is argv[0] to yt-dlp — a leading '-' would be parsed as a flag.
+  if (typeof url !== 'string' || !/^https?:\/\//.test(url)) {
+    throw new Error('yt-dlp playlist fetch failed: invalid URL');
+  }
   try {
     return await fetchYouTubePlaylistViaYtDlp(url);
   } catch (err) {
@@ -942,7 +982,7 @@ ipcMain.handle('youtube-oauth-start', async (_e, { clientId, scope, state, codeC
   const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
 
   // Open in the user's default browser — Google refuses embedded webviews
-  shell.openExternal(authUrl);
+  shell.openExternal(authUrl).catch(() => {});
 
   // Auto-timeout after 5 minutes so we don't leak the server forever
   const timeout = setTimeout(() => {
@@ -956,12 +996,13 @@ ipcMain.handle('youtube-oauth-start', async (_e, { clientId, scope, state, codeC
   try {
     const code = await codePromise;
     clearTimeout(timeout);
-    activeOauth = null;
+    // A newer oauth-start may already own activeOauth — don't clobber it.
+    if (activeOauth?.server === server) activeOauth = null;
     return { code, redirectUri };
   } catch (err) {
     clearTimeout(timeout);
     try { server.close(); } catch {}
-    activeOauth = null;
+    if (activeOauth?.server === server) activeOauth = null;
     throw err;
   }
 });
@@ -1013,7 +1054,13 @@ app.whenReady().then(() => {
       if (range) {
         const match = /bytes=(\d+)-(\d*)/.exec(range);
         const start = match ? parseInt(match[1], 10) : 0;
-        const end = match && match[2] ? parseInt(match[2], 10) : total - 1;
+        const end = match && match[2] ? Math.min(parseInt(match[2], 10), total - 1) : total - 1;
+        if (start > end) {
+          return new Response(null, {
+            status: 416,
+            headers: { 'Content-Range': `bytes */${total}`, ...CORS_HEADERS },
+          });
+        }
         const nodeStream = fs.createReadStream(filePath, { start, end });
         return new Response(Readable.toWeb(nodeStream), {
           status: 206,
@@ -1045,7 +1092,9 @@ app.whenReady().then(() => {
   protocol.handle('cupid-audio', async (request) => {
     try {
       const id = new URL(request.url).searchParams.get('id');
-      if (!id) return new Response('missing id', { status: 400, headers: CORS_HEADERS });
+      if (!id || !YT_ID_RE.test(id)) {
+        return new Response('missing id', { status: 400, headers: CORS_HEADERS });
+      }
 
       const streamUrl = await resolveStreamUrl(id);
 
@@ -1100,4 +1149,13 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+// cloudflared is a detached child that would outlive the app (holding the
+// room tunnel open); the ws/oauth servers die with the process but closing
+// them here keeps shutdown clean.
+app.on('will-quit', () => {
+  if (roomTunnelProc) { try { roomTunnelProc.kill(); } catch {} roomTunnelProc = null; }
+  if (roomWss) { try { roomWss.close(); } catch {} roomWss = null; }
+  if (activeOauth) { try { activeOauth.server.close(); } catch {} activeOauth = null; }
 });

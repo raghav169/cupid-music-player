@@ -91,7 +91,7 @@ export default function LibraryPanel({
       ))}
 
       <div className="side-label">add current song</div>
-      {currentTrack?.title && names.length > 0 ? (
+      {currentTrack?.title && currentTrack.title !== 'No track' && names.length > 0 ? (
         <div className="side-row">
           <SettingsDropdown
             value={addTarget}

@@ -53,7 +53,7 @@ export const streamAdapter = {
     return { src, art: t.art ?? null };
   },
   prefetch(t) {
-    if (!t) return;
+    if (!t || !window.cupid?.getStreamUrl) return;
     const p = t.videoId
       ? window.cupid.getStreamUrlById(t.videoId)
       : window.cupid.getStreamUrl(t.title, t.artist);

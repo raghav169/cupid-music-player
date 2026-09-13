@@ -11,9 +11,14 @@ export default function usePlaylists() {
 
   useEffect(() => {
     let cancelled = false;
-    window.cupid?.loadPlaylists?.()
-      .then((p) => { if (!cancelled) setPlaylists(p && typeof p === 'object' ? p : {}); })
-      .catch(() => { if (!cancelled) setPlaylists({}); });
+    Promise.resolve(window.cupid?.loadPlaylists?.())
+      .then((p) => {
+        if (cancelled) return;
+        const loaded = p && typeof p === 'object' ? p : {};
+        // Edits made before the load resolves win over the disk state
+        setPlaylists((cur) => (cur ? { ...loaded, ...cur } : loaded));
+      })
+      .catch(() => { if (!cancelled) setPlaylists((cur) => cur ?? {}); });
     return () => { cancelled = true; };
   }, []);
 
