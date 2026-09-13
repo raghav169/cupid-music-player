@@ -48,6 +48,19 @@ jobs:
           Get-Content "$env:TEMP\cupid-smoke-err.log" -ErrorAction SilentlyContinue
           exit $p.ExitCode
       
+      # Playwright drives the real unpacked exe: window-mode toggle, panel
+      # render checks, userData seed, cupid-local protocol — with screenshots.
+      - name: Playwright smoke + screenshots
+        run: node tests/electron-smoke.cjs
+      
+      - name: Upload smoke screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-shots
+          path: smoke-shots/
+          if-no-files-found: warn
+      
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:

@@ -8,7 +8,7 @@ const CSP = [
   "default-src 'self'",
   "script-src 'self' https://js-cdn.music.apple.com",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: https:",
+  "img-src 'self' data: https: cupid-local:", // album art via custom scheme
   "media-src 'self' cupid-local: cupid-audio:",
   "connect-src 'self' https: wss: ws:", // ws: for Listen Together LAN rooms
   "font-src 'self' data:",

@@ -1,4 +1,5 @@
 import { useRef, useEffect } from 'react';
+import { activeLyricIndex } from './lrc.js';
 
 /**
  * Synced lyrics panel — highlights the active line (last line at or
@@ -6,8 +7,7 @@ import { useRef, useEffect } from 'react';
  */
 export default function LyricsPanel({ lines, plain, currentTime, title }) {
   const listRef = useRef(null);
-  const activeIdx = lines.findLastIndex?.((l) => l.time <= currentTime)
-    ?? lines.reduce((acc, l, i) => (l.time <= currentTime ? i : acc), -1);
+  const activeIdx = activeLyricIndex(lines || [], currentTime ?? 0);
 
   useEffect(() => {
     const el = listRef.current?.children[activeIdx];
