@@ -48,6 +48,19 @@ function findAppExe() {
   return null; // linux CI not used yet
 }
 
+// Poll an app.evaluate fn until truthy or timeout — fullscreen enters are
+// animated; isFullScreen()/bounds lie mid-transition.
+async function pollApp(app, fn, timeoutMs = 8000, everyMs = 400) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (Date.now() < deadline) {
+    last = await app.evaluate(fn);
+    if (last && (last.isFS || last.covers || last === true)) return last;
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
+  return last;
+}
+
 function userDataAudioDir() {
   if (process.platform === 'win32') {
     return path.join(process.env.APPDATA, 'cupid-player', 'audio');
@@ -114,12 +127,25 @@ async function main() {
     check('cupid-local subdirectory art', false);
   }
 
+  // ── local playlist IPC (validates playlist.json + seed on this OS) ──
+  const lp = await page.evaluate(() => window.cupid.getLocalPlaylist());
+  check(`local playlist loads (${lp?.length ?? 'err'} tracks)`, Array.isArray(lp) && lp.length > 0);
+
   // ── full mode toggle ──
   await page.evaluate(() => window.cupid?.toggleMode?.());
-  await page.waitForTimeout(2000);
-  const isFull = await app.evaluate(({ BrowserWindow }) =>
-    BrowserWindow.getAllWindows()[0]?.isFullScreen());
-  check('window entered fullscreen', isFull === true);
+  // isFullScreen() lies mid-transition and on some CI displays — poll for
+  // fullscreen OR the window covering ~the whole work area.
+  const full = await pollApp(app, ({ BrowserWindow, screen }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    const wa = screen.getPrimaryDisplay().workAreaSize;
+    const b = win.getBounds();
+    return {
+      isFS: win.isFullScreen(),
+      covers: b.width >= wa.width * 0.9 && b.height >= wa.height * 0.9,
+    };
+  });
+  check(`window covers display (isFullScreen=${full?.isFS}, covers=${full?.covers})`,
+    !!(full?.isFS || full?.covers));
   await page.screenshot({ path: path.join(OUT_DIR, '02-full.png') });
   console.log('  screenshot: 02-full.png');
 
@@ -135,10 +161,13 @@ async function main() {
 
   // ── back to compact, bounds restored ──
   await page.evaluate(() => window.cupid?.toggleMode?.());
-  await page.waitForTimeout(1500);
-  const backToCompact = await app.evaluate(({ BrowserWindow }) =>
-    !BrowserWindow.getAllWindows()[0]?.isFullScreen());
-  check('window restored to compact', backToCompact === true);
+  const compact = await pollApp(app, ({ BrowserWindow, screen }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    const wa = screen.getPrimaryDisplay().workAreaSize;
+    const b = win.getBounds();
+    return !win.isFullScreen() && b.width < wa.width * 0.9;
+  });
+  check('window restored to compact', compact === true);
   await page.screenshot({ path: path.join(OUT_DIR, '03-compact-restored.png') });
   console.log('  screenshot: 03-compact-restored.png');
 

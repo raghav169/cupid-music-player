@@ -979,7 +979,12 @@ app.whenReady().then(() => {
     app.dock.setIcon(path.join(__dirname, '..', 'assets', 'pink', 'favicon.png'));
   }
 
-  seedUserAudioDirIfMissing().catch((err) => console.warn('[seed]', err.message));
+  // Seed is async — tell the renderer when it lands so it can reload the
+  // local playlist (first-launch race: renderer would otherwise see an
+  // empty library until manual reload).
+  seedUserAudioDirIfMissing()
+    .then(() => BrowserWindow.getAllWindows()[0]?.webContents.send('audio-seeded'))
+    .catch((err) => console.warn('[seed]', err.message));
 
   protocol.handle('cupid-local', async (request) => {
     try {

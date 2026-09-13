@@ -135,6 +135,9 @@ export default function App() {
   }, []);
 
   useEffect(() => { loadLocalPlaylist(); }, [loadLocalPlaylist]);
+  // Reload once the first-launch seed finishes (fires only when the
+  // seed actually ran — no-op reloads are cheap anyway)
+  useEffect(() => window.cupid?.onAudioSeeded?.(loadLocalPlaylist), [loadLocalPlaylist]);
 
   const localAdapter = useMemo(
     () => createLocalAdapter(window.cupid?.getLocalAudioPath),

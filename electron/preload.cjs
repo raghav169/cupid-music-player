@@ -18,6 +18,11 @@ contextBridge.exposeInMainWorld('cupid', {
   getStreamUrlById: (videoId) => ipcRenderer.invoke('get-stream-url-by-id', videoId),
   getAppleMusicToken: () => ipcRenderer.invoke('get-apple-music-token'),
   getLocalPlaylist: () => ipcRenderer.invoke('get-local-playlist'),
+  onAudioSeeded: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('audio-seeded', listener);
+    return () => ipcRenderer.removeListener('audio-seeded', listener);
+  },
   loadPlaylists: () => ipcRenderer.invoke('playlists-load'),
   savePlaylists: (playlists) => ipcRenderer.invoke('playlists-save', playlists),
   getEmbeddedArt: (filename) => ipcRenderer.invoke('get-embedded-art', filename),
