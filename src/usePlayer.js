@@ -30,9 +30,15 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
   // startAtRef can hold { index, autoPlay, seekTo, playing } to land on a
   // specific track (e.g. clicking a song, or a room guest joining mid-song)
   // instead of resetting to 0.
+  // IMPORTANT: consumption happens in an effect, not during render — a
+  // discarded render (StrictMode/concurrent) would otherwise consume the
+  // refs without committing the index reset, permanently desyncing.
   const prevTracksRef = useRef(tracks);
   const pendingStartRef = useRef(null);
-  if (prevTracksRef.current !== tracks) {
+  const trackIndexRef = useRef(trackIndex);
+  trackIndexRef.current = trackIndex;
+  useEffect(() => {
+    if (prevTracksRef.current === tracks) return;
     prevTracksRef.current = tracks;
     nextIdxRef.current = null;
     const start = startAtRef?.current;
@@ -41,10 +47,11 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       ? { seekTo: start.seekTo, playing: start.playing ?? (start.autoPlay ? true : undefined) }
       : null;
     const idx = start && start.index > 0 && start.index < tracks.length ? start.index : 0;
-    if (trackIndex !== idx) setTrackIndex(idx);
+    if (trackIndexRef.current !== idx) setTrackIndex(idx);
     if (start?.playing === false) setIsPlaying(false);
     else if (start?.autoPlay) setIsPlaying(true);
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tracks]);
   // Ref so the async load effect sees the latest value when it resolves,
   // not the one captured when it started
   const isPlayingRef = useRef(false);
@@ -84,6 +91,9 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       setLoading(false);
       setIsPlaying(false);
       setPlayError(null);
+      setProgress(0);
+      setCurrentTime(0);
+      setDuration(0);
       audio.removeAttribute('src');
       audio.load();
       return;
