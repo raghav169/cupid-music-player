@@ -53,6 +53,7 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [playError, setPlayError] = useState(null);
   const [resolvedArt, setResolvedArt] = useState(null);
   const [volume, setVolumeState] = useState(() => {
     try {
@@ -90,6 +91,7 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     let cancelled = false;
     setLoading(true);
     setResolvedArt(null);
+    setPlayError(null);
 
     (async () => {
       try {
@@ -124,6 +126,7 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       } catch (err) {
         if (cancelled) return;
         console.error('Failed to load track:', err.message);
+        setPlayError(err.message || 'load failed');
         // Unload fully — the previous track must not keep sounding
         // under the new title
         audio.removeAttribute('src');
@@ -182,10 +185,22 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       if (audio.duration) {
         setProgress(audio.currentTime / audio.duration);
       }
+      pushPositionState();
     };
 
     const onLoadedMetadata = () => {
       setDuration(audio.duration);
+    };
+
+    // Position for the OS media overlay (SMTC) — scrubbing works there
+    const pushPositionState = () => {
+      try {
+        navigator.mediaSession?.setPositionState({
+          duration: Number.isFinite(audio.duration) ? audio.duration : 0,
+          playbackRate: 1,
+          position: Math.min(audio.currentTime, audio.duration || 0),
+        });
+      } catch { /* position must not exceed duration — just skip */ }
     };
 
     const onEnded = () => {
@@ -211,14 +226,25 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       });
     };
 
+    const onError = () => {
+      // Media errors (bad src, decode failure, CORS reject) fire async after
+      // src is set — without this the UI sat on "playing" at 0:00 forever.
+      if (!audio.getAttribute('src')) return;
+      setPlayError(audio.error?.message || 'track failed to load');
+      setIsPlaying(false);
+      audio.pause();
+    };
+
     audio.addEventListener('timeupdate', onTimeUpdate);
     audio.addEventListener('loadedmetadata', onLoadedMetadata);
     audio.addEventListener('ended', onEnded);
+    audio.addEventListener('error', onError);
 
     return () => {
       audio.removeEventListener('timeupdate', onTimeUpdate);
       audio.removeEventListener('loadedmetadata', onLoadedMetadata);
       audio.removeEventListener('ended', onEnded);
+      audio.removeEventListener('error', onError);
     };
   }, [tracks.length]);
 
@@ -294,6 +320,47 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     });
   }, [volume, audio]);
 
+  // ── OS media session (SMTC on Windows) — media keys + lock-screen card ──
+  // Lives below the playback callbacks: the deps array is evaluated at
+  // render time, so referencing next/prev before their const declarations
+  // is a TDZ crash.
+  useEffect(() => {
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    try { ms.setActionHandler('play', () => { engine.play().catch(() => {}); setIsPlaying(true); }); } catch {}
+    try { ms.setActionHandler('pause', () => { engine.pause(); setIsPlaying(false); }); } catch {}
+    try { ms.setActionHandler('nexttrack', () => next()); } catch {}
+    try { ms.setActionHandler('previoustrack', () => prev()); } catch {}
+    try {
+      ms.setActionHandler('seekto', (d) => {
+        if (typeof d.seekTime === 'number' && audio.duration) audio.currentTime = d.seekTime;
+      });
+    } catch {}
+    return () => {
+      for (const a of ['play', 'pause', 'nexttrack', 'previoustrack', 'seekto']) {
+        try { ms.setActionHandler(a, null); } catch {}
+      }
+    };
+  }, [engine, audio, next, prev]);
+
+  // Track metadata + playing state for the OS overlay
+  useEffect(() => {
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    try {
+      const art = track.art;
+      ms.metadata = new MediaMetadata({
+        title: track.title ?? '',
+        artist: track.artist ?? '',
+        album: track.album ?? '',
+        // Loopback (127.0.0.1) art only resolves inside this app — the shell
+        // fetches artwork itself, so only send genuinely remote/data URLs.
+        artwork: art && (/^https:\/\//.test(art) || art.startsWith('data:')) ? [{ src: art }] : [],
+      });
+      ms.playbackState = isPlaying ? 'playing' : 'paused';
+    } catch { /* mediaSession is cosmetic */ }
+  }, [track.title, track.artist, track.album, track.art, isPlaying]);
+
   return {
     track,
     trackIndex,
@@ -310,6 +377,7 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     muted,
     toggleMute,
     loading,
+    playError,
     engine,
   };
 }

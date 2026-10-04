@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "dotenv": "^17.4.2",
+    "electron-updater": "^6.6.2",
     "jsonwebtoken": "^9.0.3",
     "music-metadata": "^11.12.3",
     "react": "^18.3.1",
@@ -61,6 +62,11 @@
     ],
     "directories": {
       "output": "out"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "raghav169",
+      "repo": "cupid-music-player"
     },
     "mac": {
       "target": "dir",

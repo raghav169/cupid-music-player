@@ -4,7 +4,7 @@
  * it to warm the main-process stream cache for adjacent tracks.
  */
 
-// Local files via the cupid-local:// protocol (or ./<file> in browser preview).
+// Local files via the loopback media server in main (or ./<file> in browser preview).
 // Falls back to embedded art (music-metadata in the main process) when
 // playlist.json has no `art` field.
 export function createLocalAdapter(getAudioPath) {
@@ -43,7 +43,7 @@ export function createMixedAdapter(localAdapter) {
   };
 }
 
-// Streaming tracks (spotify/apple/youtube) — resolved to cupid-audio:// URLs
+// Streaming tracks (spotify/apple/youtube) — resolved to loopback /stream URLs
 // in the main process via youtubei.js search + yt-dlp extraction.
 export const streamAdapter = {
   async load(t) {

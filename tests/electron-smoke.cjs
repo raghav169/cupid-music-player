@@ -5,7 +5,9 @@
  * Runs on macOS dev machines (out/mac-arm64/*.app) and on the
  * windows-latest CI runner (out/win-unpacked/*.exe). Captures
  * screenshots to smoke-shots/, checks the userData seed, exercises
- * the cupid-local protocol, and toggles compact ↔ full mode.
+ * the loopback media server (art via <img>, audio via a
+ * crossOrigin='anonymous' <audio> — the exact load path AudioEngine
+ * uses, incl. Range/seek), and toggles compact ↔ full mode.
  *
  * Usage: node tests/electron-smoke.cjs
  * Exit 0 = all hard checks passed. Warnings (e.g. tunnel) don't fail.
@@ -108,7 +110,7 @@ async function main() {
     check('song photos/ subdirectory seeded (windows path-sep regression)', hasSubdirArt);
   }
 
-  // ── cupid-local protocol — same way the app uses it: <img>/<audio> src ──
+  // ── loopback media server — same way the app uses it: <img>/<audio> src ──
   const artFile = fs.existsSync(audioDir)
     ? fs.readdirSync(path.join(audioDir, 'song photos'))[0]
     : null;
@@ -122,9 +124,40 @@ async function main() {
       setTimeout(() => res({ loaded: false, timeout: true, url }), 8000);
     }), artFile);
     if (!img.loaded) console.log(`    url was: ${img.url}`);
-    check(`cupid-local serves subdirectory art (${artFile})`, img.loaded === true && img.w > 0);
+    check(`media server serves subdirectory art (${artFile})`, img.loaded === true && img.w > 0);
   } else {
-    check('cupid-local subdirectory art', false);
+    check('media server subdirectory art', false);
+  }
+
+  // ── audio load — CORS-enabled <audio>, exactly what AudioEngine does.
+  // This is the check that would have caught the custom-scheme CORS bug:
+  // an <img> has no CORS mode, so the old test could pass while every
+  // track failed to load.
+  const audioFile = fs.existsSync(audioDir)
+    ? fs.readdirSync(audioDir).find((f) => /\.(mp3|m4a|aac|flac|wav|ogg|opus|webm)$/i.test(f))
+    : null;
+  if (audioFile) {
+    const au = await page.evaluate((f) => new Promise(async (res) => {
+      const url = await window.cupid.getLocalAudioPath(f);
+      const el = new Audio();
+      el.crossOrigin = 'anonymous'; // REQUIRED — matches AudioEngine
+      const fail = (why) => res({ ok: false, why, url });
+      el.onerror = () => fail(`media error code ${el.error?.code}`);
+      el.onloadedmetadata = () => {
+        const dur = el.duration;
+        if (!(dur > 0)) return fail(`duration=${dur}`);
+        // seek exercises the Range/206 path
+        el.onseeked = () => res({ ok: true, duration: dur, sought: el.currentTime, url });
+        el.currentTime = dur / 2;
+      };
+      el.src = url;
+      setTimeout(() => fail('timeout'), 15000);
+    }), audioFile);
+    if (!au.ok) console.log(`    url was: ${au.url} (${au.why})`);
+    check(`media server streams audio CORS-enabled (${audioFile})`, au.ok === true);
+    if (au.ok) check(`  → duration ${au.duration.toFixed(1)}s, seek to ${au.sought.toFixed(1)}s`, true);
+  } else {
+    check('media server audio streaming (no audio file in seed)', false);
   }
 
   // ── local playlist IPC (validates playlist.json + seed on this OS) ──

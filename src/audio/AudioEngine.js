@@ -4,7 +4,7 @@
  * BiquadFilter EQ chain between source and analyser.
  *
  * The graph requires CORS-clean media, so the element uses
- * crossOrigin='anonymous' — both cupid-local:// and cupid-audio:// send
+ * crossOrigin='anonymous' — the loopback media server (127.0.0.1) sends
  * Access-Control-Allow-Origin: * from the main process.
  */
 // 10-band EQ: lowshelf → 8 peaking → highshelf

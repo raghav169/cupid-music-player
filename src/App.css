@@ -1,6 +1,11 @@
 .app-shell {
   width: 100vw;
   height: 100vh;
+  /* --w is one "logical viewport width": the width of the 306-unit frame.
+     Compact mode = the window IS the frame. Full mode = frame column is
+     centered at full screen height (306:497 aspect). Defined here (not on
+     .player) so portaled dropdown menus outside .player still resolve it. */
+  --w: 100vw;
   --color-title: #78364F;
   --color-primary: #5a3a4a;
   --color-secondary: #8a6a7a;
@@ -37,6 +42,7 @@
 
 /* Full mode: dimmed backdrop, side panels flanking the player column */
 .app-shell.mode-full {
+  --w: calc(100vh * 306 / 497);
   background: rgba(8, 6, 10, 0.72);
   display: flex;
   justify-content: center;
@@ -46,10 +52,6 @@
 
 .player {
   position: relative;
-  /* --w is one "logical viewport width": the width of the 306-unit frame.
-     Compact mode = the window IS the frame. Full mode = frame column is
-     centered at full screen height (306:497 aspect). */
-  --w: 100vw;
   width: var(--w);
   height: 100vh;
   overflow: hidden;
@@ -59,7 +61,7 @@
 }
 
 .player.mode-full {
-  --w: calc(100vh * 306 / 497);
+  /* --w now inherited from .app-shell.mode-full */
 }
 
 .mode-full .resize-handle {

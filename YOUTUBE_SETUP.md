@@ -83,8 +83,8 @@ You can add up to 100 test users without going through Google's app verification
 ### Yellow "Google hasn't verified this app" warning when signing in
 Expected — your app is in "Testing" status. Click **Advanced** at the bottom-left, then **Go to cupid-player (unsafe)**. Safe to bypass because it's your own app; the "unsafe" copy is generic.
 
-### Playlist plays back as silence / `502 Bad Gateway` from `cupid-audio://`
-The main process couldn't extract the audio stream from YouTube. Check the terminal where you ran `npm run dev` for a `[cupid-audio]` log line — that's the actual error.
+### Playlist shows "couldn't play this one" / `502` from the media server
+The main process couldn't extract the audio stream from YouTube (audio is proxied through `http://127.0.0.1:<port>/stream?id=…`). Check the terminal where you ran `npm run dev` for a `[stream]` log line — that's the actual error.
 
 Most common cause: **yt-dlp binary missing or broken**. The fix path:
 

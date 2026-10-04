@@ -79,9 +79,10 @@ export function SettingsDropdown({ value, options, onChange }) {
             </button>
           ))}
         </div>,
-        // Portal to .player so CSS custom properties (--color-primary, etc.)
-        // and the theme class still cascade. document.body would orphan them.
-        document.querySelector('.player') ?? document.body,
+        // Portal to .app-shell — it carries the theme CSS custom properties
+        // (--color-*, --w) AND isn't clip-path'd like .player, so menus
+        // opened from the side panels (library/search) stay visible.
+        document.querySelector('.app-shell') ?? document.body,
       )}
     </div>
   );
