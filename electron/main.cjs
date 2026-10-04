@@ -54,21 +54,35 @@ const MEDIA_MIME_BY_EXT = {
 // /local/<file> — files under userAudioDir() only, with Range support.
 async function serveLocalMedia(u, req, res, cors) {
   const filename = decodeURIComponent(u.pathname.slice('/local/'.length));
-  if (!filename || filename.includes('..') || filename.includes('\\')) {
+  const root = userAudioDir();
+  const filePath = path.resolve(root, filename);
+  const inside = filePath === root || filePath.startsWith(root + path.sep);
+  if (!filename || !inside || filename.includes('..') || filename.includes('\\')) {
     res.writeHead(403, cors);
     res.end('forbidden');
     return;
   }
   try {
-    const filePath = path.join(userAudioDir(), filename);
     const stat = await fs.promises.stat(filePath);
     const total = stat.size;
     const range = req.headers.range;
     const contentType = MEDIA_MIME_BY_EXT[path.extname(filename).toLowerCase()] || 'application/octet-stream';
 
+    const pipeFile = (opts) => {
+      const s = fs.createReadStream(filePath, opts);
+      s.on('error', () => res.destroy());
+      s.pipe(res);
+    };
+
     if (range) {
-      const match = /bytes=(\d+)-(\d*)/.exec(range);
-      const start = match ? parseInt(match[1], 10) : 0;
+      const match = /^bytes=(\d+)-(\d*)$/.exec(range);
+      const suffix = /^bytes=-(\d+)$/.exec(range);
+      if (!match && !suffix) {
+        res.writeHead(416, { 'Content-Range': `bytes */${total}`, ...cors });
+        res.end();
+        return;
+      }
+      const start = match ? parseInt(match[1], 10) : Math.max(0, total - parseInt(suffix[1], 10));
       const end = match && match[2] ? Math.min(parseInt(match[2], 10), total - 1) : total - 1;
       if (start > end) {
         res.writeHead(416, { 'Content-Range': `bytes */${total}`, ...cors });
@@ -82,7 +96,7 @@ async function serveLocalMedia(u, req, res, cors) {
         'Content-Type': contentType,
         ...cors,
       });
-      fs.createReadStream(filePath, { start, end }).pipe(res);
+      pipeFile({ start, end });
       return;
     }
 
@@ -92,7 +106,7 @@ async function serveLocalMedia(u, req, res, cors) {
       'Content-Type': contentType,
       ...cors,
     });
-    fs.createReadStream(filePath).pipe(res);
+    pipeFile();
   } catch (err) {
     console.error('[media local]', err.message);
     res.writeHead(404, cors);
@@ -117,7 +131,9 @@ async function serveStreamMedia(u, req, res, cors) {
       'User-Agent': 'Mozilla/5.0',
     };
     if (req.headers.range) headers.Range = req.headers.range;
-    const upstream = await net.fetch(streamUrl, { headers });
+    const ctrl = new AbortController();
+    req.on('close', () => ctrl.abort()); // client left — stop upstream download
+    const upstream = await net.fetch(streamUrl, { headers, signal: ctrl.signal });
     const pass = {};
     for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
       const v = upstream.headers.get(h);
@@ -126,7 +142,9 @@ async function serveStreamMedia(u, req, res, cors) {
     // bestaudio isn't always m4a (e.g. webm/opus) — pass the real type through
     if (!pass['content-type']) pass['content-type'] = 'audio/mp4';
     res.writeHead(upstream.status, { ...pass, ...cors });
-    Readable.fromWeb(upstream.body).pipe(res);
+    const body = Readable.fromWeb(upstream.body);
+    body.on('error', () => res.destroy());
+    body.pipe(res);
   } catch (err) {
     console.error('[media stream]', err.message);
     res.writeHead(502, cors);
