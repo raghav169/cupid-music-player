@@ -83,6 +83,7 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       setResolvedArt(null);
       setLoading(false);
       setIsPlaying(false);
+      setPlayError(null);
       audio.removeAttribute('src');
       audio.load();
       return;
@@ -92,6 +93,12 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     setLoading(true);
     setResolvedArt(null);
     setPlayError(null);
+    // Reset synchronously — "loaded" gates elsewhere (e.g. recordPlay's
+    // duration > 0 check) must not see the previous track's duration
+    // while the new track is still loading.
+    setProgress(0);
+    setCurrentTime(0);
+    setDuration(0);
 
     (async () => {
       try {
@@ -101,9 +108,6 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
         if (!res?.src) throw new Error('no playable source');
         // setting src triggers loading; an explicit audio.load() would reset it
         audio.src = res.src;
-        setProgress(0);
-        setCurrentTime(0);
-        setDuration(0);
         const pending = pendingStartRef.current;
         pendingStartRef.current = null;
         // Room guests join mid-song — seek once metadata lands (setting
@@ -320,28 +324,8 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     });
   }, [volume, audio]);
 
-  // ── OS media session (SMTC on Windows) — media keys + lock-screen card ──
-  // Lives below the playback callbacks: the deps array is evaluated at
-  // render time, so referencing next/prev before their const declarations
-  // is a TDZ crash.
-  useEffect(() => {
-    const ms = navigator.mediaSession;
-    if (!ms) return;
-    try { ms.setActionHandler('play', () => { engine.play().catch(() => {}); setIsPlaying(true); }); } catch {}
-    try { ms.setActionHandler('pause', () => { engine.pause(); setIsPlaying(false); }); } catch {}
-    try { ms.setActionHandler('nexttrack', () => next()); } catch {}
-    try { ms.setActionHandler('previoustrack', () => prev()); } catch {}
-    try {
-      ms.setActionHandler('seekto', (d) => {
-        if (typeof d.seekTime === 'number' && audio.duration) audio.currentTime = d.seekTime;
-      });
-    } catch {}
-    return () => {
-      for (const a of ['play', 'pause', 'nexttrack', 'previoustrack', 'seekto']) {
-        try { ms.setActionHandler(a, null); } catch {}
-      }
-    };
-  }, [engine, audio, next, prev]);
+  // MediaSession action handlers live in App.jsx — they must route through
+  // room-aware transport (a guest's media keys forward to the host).
 
   // Track metadata + playing state for the OS overlay
   useEffect(() => {

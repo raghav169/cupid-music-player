@@ -6,6 +6,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { Readable } = require('node:stream');
 const http = require('node:http');
+const crypto = require('node:crypto');
 const os = require('node:os');
 
 const fs = require('node:fs');
@@ -15,8 +16,18 @@ const execFileAsync = promisify(execFile);
 
 // CORS for loopback media responses — the renderer origin (vite dev server or
 // file://) is cross-origin from http://127.0.0.1:<port>, and Web Audio's
-// MediaElementSource requires CORS-clean media.
-const CORS_HEADERS = { 'Access-Control-Allow-Origin': '*' };
+// MediaElementSource requires CORS-clean media. Reflect only the real
+// renderer origins — never '*', or any web page could read the endpoints.
+const ALLOWED_MEDIA_ORIGINS = new Set(['null', 'http://127.0.0.1:5173']);
+function mediaCors(req) {
+  const origin = req.headers.origin;
+  return ALLOWED_MEDIA_ORIGINS.has(origin) ? { 'Access-Control-Allow-Origin': origin } : {};
+}
+
+// Every media URL carries a per-launch token — the endpoints are otherwise
+// reachable by any local process and (sans PNA, e.g. Firefox/Safari) by web
+// pages. Only renderer code sees the token (via IPC-built URLs).
+const MEDIA_TOKEN = crypto.randomBytes(16).toString('hex');
 
 // Insertion-ordered eviction so stream/video caches can't grow unbounded.
 function cacheSetBounded(map, key, value, max = 500) {
@@ -52,18 +63,35 @@ const MEDIA_MIME_BY_EXT = {
 };
 
 // /local/<file> — files under userAudioDir() only, with Range support.
+// Containment is two-layer: lexical (path.resolve + root prefix, which also
+// normalizes '..') then realpath, so symlinks/junctions inside the audio
+// dir can't escape to files elsewhere on disk.
+let mediaRealRoot = null;
 async function serveLocalMedia(u, req, res, cors) {
   const filename = decodeURIComponent(u.pathname.slice('/local/'.length));
   const root = userAudioDir();
   const filePath = path.resolve(root, filename);
   const inside = filePath === root || filePath.startsWith(root + path.sep);
-  if (!filename || !inside || filename.includes('..') || filename.includes('\\')) {
+  if (!filename || !inside || filename.includes('\\')) {
     res.writeHead(403, cors);
     res.end('forbidden');
     return;
   }
   try {
+    if (mediaRealRoot) {
+      const real = await fs.promises.realpath(filePath);
+      if (real !== mediaRealRoot && !real.startsWith(mediaRealRoot + path.sep)) {
+        res.writeHead(403, cors);
+        res.end('forbidden');
+        return;
+      }
+    }
     const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile()) {
+      res.writeHead(404, cors);
+      res.end('not found');
+      return;
+    }
     const total = stat.size;
     const range = req.headers.range;
     const contentType = MEDIA_MIME_BY_EXT[path.extname(filename).toLowerCase()] || 'application/octet-stream';
@@ -71,6 +99,7 @@ async function serveLocalMedia(u, req, res, cors) {
     const pipeFile = (opts) => {
       const s = fs.createReadStream(filePath, opts);
       s.on('error', () => res.destroy());
+      res.on('close', () => s.destroy()); // client left mid-body — close the fd
       s.pipe(res);
     };
 
@@ -123,6 +152,13 @@ async function serveStreamMedia(u, req, res, cors) {
     res.end('missing id');
     return;
   }
+  // Each novel videoId can spawn a yt-dlp resolve — cap in-flight resolves
+  // so a hostile local caller can't fork-bomb the host through us.
+  if (pendingDecipher.size >= 6 && !decipheredCache.has(id)) {
+    res.writeHead(429, cors);
+    res.end('busy');
+    return;
+  }
   try {
     const streamUrl = await resolveStreamUrl(id);
     const headers = {
@@ -133,7 +169,15 @@ async function serveStreamMedia(u, req, res, cors) {
     if (req.headers.range) headers.Range = req.headers.range;
     const ctrl = new AbortController();
     req.on('close', () => ctrl.abort()); // client left — stop upstream download
-    const upstream = await net.fetch(streamUrl, { headers, signal: ctrl.signal });
+    const upstream = await net.fetch(streamUrl, {
+      headers,
+      signal: AbortSignal.any([ctrl.signal, AbortSignal.timeout(30_000)]),
+    });
+    if (!upstream.body) {
+      res.writeHead(502, cors);
+      res.end('no body');
+      return;
+    }
     const pass = {};
     for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
       const v = upstream.headers.get(h);
@@ -147,13 +191,13 @@ async function serveStreamMedia(u, req, res, cors) {
     body.pipe(res);
   } catch (err) {
     console.error('[media stream]', err.message);
-    res.writeHead(502, cors);
+    if (!res.headersSent) res.writeHead(502, cors);
     res.end('failed');
   }
 }
 
 mediaServer.on('request', async (req, res) => {
-  const cors = { 'Access-Control-Allow-Origin': '*' };
+  const cors = mediaCors(req);
   try {
     const u = new URL(req.url, 'http://127.0.0.1');
     if (req.method === 'OPTIONS') {
@@ -170,6 +214,11 @@ mediaServer.on('request', async (req, res) => {
       res.end();
       return;
     }
+    if (u.searchParams.get('key') !== MEDIA_TOKEN) {
+      res.writeHead(401, cors);
+      res.end('unauthorized');
+      return;
+    }
     if (u.pathname === '/stream') {
       await serveStreamMedia(u, req, res, cors);
       return;
@@ -182,12 +231,16 @@ mediaServer.on('request', async (req, res) => {
     res.end('not found');
   } catch (err) {
     console.error('[media]', err.message);
-    if (!res.headersSent) res.writeHead(500, { 'Access-Control-Allow-Origin': '*' });
+    if (!res.headersSent) res.writeHead(500, mediaCors(req));
     res.end();
   }
 });
 
-function startMediaServer() {
+async function startMediaServer() {
+  // Realpath of the served root — the second containment layer in
+  // serveLocalMedia. If the dir doesn't exist yet, fall back to lexical
+  // only (requests 404 anyway until files land).
+  try { mediaRealRoot = await fs.promises.realpath(userAudioDir()); } catch { /* unseeded yet */ }
   return new Promise((resolve, reject) => {
     mediaServer.once('error', reject);
     // Port 0 → OS picks a free one; loopback only.
@@ -452,7 +505,7 @@ async function getStreamUrl(title, artist) {
       // Best-effort pre-warm so the renderer's media request hits the decipher cache
       resolveStreamUrl(videoId).catch(() => {});
 
-      const url = `${mediaBase()}/stream?id=${encodeURIComponent(videoId)}`;
+      const url = `${mediaBase()}/stream?id=${encodeURIComponent(videoId)}&key=${MEDIA_TOKEN}`;
       cacheSetBounded(streamCache, cacheKey, { url, time: Date.now() });
       return url;
     } finally {
@@ -469,7 +522,7 @@ async function getStreamUrl(title, artist) {
 function streamUrlForVideoId(videoId) {
   if (!YT_ID_RE.test(videoId)) throw new Error('Invalid YouTube video ID');
   resolveStreamUrl(videoId).catch(() => {});
-  return `${mediaBase()}/stream?id=${encodeURIComponent(videoId)}`;
+  return `${mediaBase()}/stream?id=${encodeURIComponent(videoId)}&key=${MEDIA_TOKEN}`;
 }
 
 // Fetch a public/unlisted YouTube playlist via yt-dlp --flat-playlist.
@@ -503,9 +556,10 @@ const isDev = process.env.NODE_ENV === 'development';
 let tray = null;
 let updateThumbar = null;
 let lastPlaybackState = { isPlaying: false };
+let mainWindow = null; // the player window — OAuth modals are separate windows
 
 function sendMediaCommand(op) {
-  BrowserWindow.getAllWindows()[0]?.webContents.send('media-command', op);
+  mainWindow?.webContents.send('media-command', op);
 }
 
 // Renderer pushes { isPlaying, title, progress } here; we mirror it onto
@@ -513,8 +567,8 @@ function sendMediaCommand(op) {
 ipcMain.on('playback-state', (_e, s) => {
   if (!s || typeof s !== 'object') return;
   lastPlaybackState = s;
-  const win = BrowserWindow.getAllWindows()[0];
-  if (!win) return;
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
   if (updateThumbar) updateThumbar(!!s.isPlaying);
   const p = typeof s.progress === 'number' && Number.isFinite(s.progress) && s.progress >= 0
     ? Math.min(1, s.progress) : -1;
@@ -593,6 +647,9 @@ function createWindow() {
     updateThumbar = build;
     win.on('closed', () => { updateThumbar = null; });
   }
+
+  mainWindow = win;
+  win.on('closed', () => { if (mainWindow === win) mainWindow = null; });
 
   // Lock aspect ratio so only proportional resizing is allowed
   const ASPECT = WIDTH / HEIGHT;
@@ -829,7 +886,7 @@ ipcMain.handle('get-local-audio-path', (_e, filename) => {
   // the media server rejects. Served over loopback http so the dev renderer
   // (served over http://) can play it — <audio> won't load file:// cross-origin.
   const posixPath = normalized.split(path.sep).join('/');
-  return `${mediaBase()}/local/${encodeURIComponent(posixPath)}`;
+  return `${mediaBase()}/local/${encodeURIComponent(posixPath)}?key=${MEDIA_TOKEN}`;
 });
 
 ipcMain.handle('open-music-folder', async () => {
@@ -840,12 +897,23 @@ ipcMain.handle('open-music-folder', async () => {
 });
 
 // Resolve a relative filename inside the audio dir — shared safety check.
-function resolveLocalAudioFile(filename) {
+// Lexical containment plus a realpath check so a symlink/junction inside
+// the audio dir can't point file reads at the rest of the disk.
+async function resolveLocalAudioFile(filename) {
   if (typeof filename !== 'string' || !filename) return null;
   const normalized = path.normalize(filename);
   if (normalized.startsWith('..') || path.isAbsolute(normalized)) return null;
-  const base = isDev ? path.join(__dirname, '..', 'audio') : userAudioDir();
-  return path.join(base, normalized);
+  const base = userAudioDir();
+  const filePath = path.resolve(base, normalized);
+  if (filePath !== path.resolve(base) && !filePath.startsWith(path.resolve(base) + path.sep)) return null;
+  try {
+    const realBase = await fs.promises.realpath(base);
+    const real = await fs.promises.realpath(filePath);
+    if (real !== realBase && !real.startsWith(realBase + path.sep)) return null;
+  } catch {
+    return null; // missing file or unreadable link — treat as not found
+  }
+  return filePath;
 }
 
 // ── User playlists ────────────────────────────────────────
@@ -879,7 +947,7 @@ ipcMain.handle('playlists-save', async (_e, playlists) => {
 // music-metadata is ESM-only → dynamic import. Returns a data URL so the
 // renderer can use it directly as an <img> src.
 ipcMain.handle('get-embedded-art', async (_e, filename) => {
-  const file = resolveLocalAudioFile(filename);
+  const file = await resolveLocalAudioFile(filename);
   if (!file) return null;
   try {
     const { parseFile } = await import('music-metadata');
@@ -920,7 +988,7 @@ ipcMain.handle('get-lyrics', async (_e, track) => {
   if (!track?.title) return null;
 
   if (track.file) {
-    const file = resolveLocalAudioFile(track.file);
+    const file = await resolveLocalAudioFile(track.file);
     if (file) {
       // Sidecar .lrc next to the audio file
       const lrcPath = file.replace(/\.[^.]+$/, '.lrc');
@@ -1056,7 +1124,7 @@ ipcMain.handle('room-host', () => {
       ws.on('message', (d) => {
         try {
           const msg = JSON.parse(d);
-          BrowserWindow.getAllWindows()[0]?.webContents.send('room-command', msg);
+          mainWindow?.webContents.send('room-command', msg);
         } catch { /* malformed message */ }
       });
     });
@@ -1231,7 +1299,7 @@ ipcMain.handle('youtube-oauth-cancel', () => {
 app.whenReady().then(async () => {
   // Needed for Windows toast notifications (track changes) to be attributed
   // to the app instead of "Electron". Also what jump lists/SMTC hang off.
-  app.setAppUserModelId('com.cupid.player');
+  app.setAppUserModelId('com.codedbycupidity.cupid-player'); // must match build.appId
 
   if (process.platform === 'darwin' && app.dock) {
     app.dock.setIcon(path.join(__dirname, '..', 'assets', 'pink', 'favicon.png'));
@@ -1243,8 +1311,11 @@ app.whenReady().then(async () => {
       tray = new Tray(trayIcon);
       tray.setToolTip('cupid player');
       const toggleWindow = () => {
-        const w = BrowserWindow.getAllWindows()[0];
-        if (w) { w.isVisible() ? w.hide() : w.show(); }
+        const w = mainWindow;
+        if (!w) return;
+        if (w.isMinimized()) { w.restore(); w.show(); }
+        else if (w.isVisible()) { w.hide(); }
+        else { w.show(); }
       };
       tray.on('click', toggleWindow);
       tray.setContextMenu(Menu.buildFromTemplate([
@@ -1270,10 +1341,16 @@ app.whenReady().then(async () => {
   // local playlist (first-launch race: renderer would otherwise see an
   // empty library until manual reload).
   seedUserAudioDirIfMissing()
-    .then(() => BrowserWindow.getAllWindows()[0]?.webContents.send('audio-seeded'))
+    .then(() => mainWindow?.webContents.send('audio-seeded'))
     .catch((err) => console.warn('[seed]', err.message));
 
-  await startMediaServer();
+  // A media-server failure must not take down the app — degrade to "media
+  // endpoints 502" instead of launching to nothing.
+  try {
+    await startMediaServer();
+  } catch (err) {
+    console.error('[media server] failed to start — media playback unavailable:', err.message);
+  }
 
   createWindow();
 
@@ -1281,7 +1358,7 @@ app.whenReady().then(async () => {
   // seed, media server, window creation, renderer load — then exits 0.
   // The workflow kills it if it hangs, so a crash = CI failure.
   if (process.env.CUPID_SMOKE_TEST === '1') {
-    const win = BrowserWindow.getAllWindows()[0];
+    const win = mainWindow;
     const ok = (msg) => { console.log(`[smoke] ${msg}`); app.exit(0); };
     win.webContents.once('did-finish-load', () => ok('renderer loaded'));
     win.webContents.once('did-fail-load', (_e, code, desc) => {
@@ -1296,8 +1373,10 @@ app.whenReady().then(async () => {
   execFile(getYtDlpPath(), ['--version'], () => {});
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (!mainWindow) createWindow();
   });
+}).catch((err) => {
+  console.error('[startup] fatal error during initialization:', err);
 });
 
 app.on('window-all-closed', () => {

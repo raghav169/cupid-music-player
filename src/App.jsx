@@ -268,11 +268,12 @@ export default function App() {
     window.cupid?.setPlaybackState?.({ isPlaying, title: track?.title, progress });
   }, [isPlaying, track?.title, progress]);
 
-  // Taskbar buttons / tray menu / OS media keys arrive as 'media-command'.
-  // TransportRef keeps the subscription stable while room-mode routing
-  // (guest → forward to host) stays live.
-  const transportRef = useRef({ doTogglePlay, doNext, doPrev });
-  transportRef.current = { doTogglePlay, doNext, doPrev };
+  // Taskbar buttons / tray menu / OS media keys arrive as 'media-command';
+  // OS media keys (SMTC/MediaSession) go through the same routing. The ref
+  // keeps both subscriptions stable while room-mode transport (guest →
+  // forward to host) stays live.
+  const transportRef = useRef({ doTogglePlay, doNext, doPrev, doSeek, duration, isPlaying });
+  transportRef.current = { doTogglePlay, doNext, doPrev, doSeek, duration, isPlaying };
   useEffect(() => {
     return window.cupid?.onMediaCommand?.((op) => {
       const t = transportRef.current;
@@ -280,6 +281,29 @@ export default function App() {
       else if (op === 'next') t.doNext();
       else if (op === 'prev') t.doPrev();
     });
+  }, []);
+
+  // OS media keys / lock-screen transport — same room-aware routing as the
+  // taskbar buttons (a guest's media keys forward to the host).
+  useEffect(() => {
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    const t = () => transportRef.current;
+    // 'play'/'pause' are states, not toggles — ignore ones already satisfied
+    try { ms.setActionHandler('play', () => { if (!t().isPlaying) t().doTogglePlay(); }); } catch {}
+    try { ms.setActionHandler('pause', () => { if (t().isPlaying) t().doTogglePlay(); }); } catch {}
+    try { ms.setActionHandler('nexttrack', () => t().doNext()); } catch {}
+    try { ms.setActionHandler('previoustrack', () => t().doPrev()); } catch {}
+    try {
+      ms.setActionHandler('seekto', (d) => {
+        if (typeof d.seekTime === 'number' && t().duration > 0) t().doSeek(d.seekTime / t().duration);
+      });
+    } catch {}
+    return () => {
+      for (const a of ['play', 'pause', 'nexttrack', 'previoustrack', 'seekto']) {
+        try { ms.setActionHandler(a, null); } catch {}
+      }
+    };
   }, []);
 
   // Track-change toast when the window isn't focused (Windows action center)
