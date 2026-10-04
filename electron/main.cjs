@@ -574,6 +574,77 @@ ipcMain.on('playback-state', (_e, s) => {
     ? Math.min(1, s.progress) : -1;
   win.setProgressBar(s.isPlaying ? p : -1);
   if (tray) tray.setToolTip(s.title ? `cupid — ${s.title}` : 'cupid player');
+  discordUpdate(s);
+});
+
+// ── Discord Rich Presence ────────────────────────────────
+// Optional: needs a Discord app client id in CUPID_DISCORD_CLIENT_ID
+// (create one free at discord.com/developers). discord-rpc is lazily
+// required so the app runs fine without the package or Discord.
+const DISCORD_CLIENT_ID = process.env.CUPID_DISCORD_CLIENT_ID || null;
+let discordEnabled = false;
+let discordClient = null;
+let discordReady = false;
+
+async function discordEnsure() {
+  if (!DISCORD_CLIENT_ID) return false;
+  if (discordReady) return true;
+  if (!discordClient) {
+    try {
+      // eslint-disable-next-line global-require
+      const RPC = require('discord-rpc');
+      discordClient = new RPC.Client({ transport: 'ipc' });
+      discordClient.on('disconnected', () => { discordReady = false; });
+    } catch {
+      return false; // package not installed
+    }
+  }
+  try {
+    await discordClient.login({ clientId: DISCORD_CLIENT_ID });
+    discordReady = true;
+  } catch {
+    discordReady = false; // Discord not running / id invalid — retry next push
+  }
+  return discordReady;
+}
+
+async function discordUpdate(s) {
+  if (!discordEnabled) return;
+  if (!(await discordEnsure())) return;
+  try {
+    if (!s.isPlaying || !s.title) {
+      await discordClient.clearActivity();
+      return;
+    }
+    await discordClient.setActivity({
+      details: String(s.title).slice(0, 128),
+      state: s.artist ? `by ${String(s.artist).slice(0, 100)}` : 'cupid player',
+      largeImageKey: 'cupid',
+      largeImageText: 'cupid player',
+      instance: false,
+    });
+  } catch {
+    discordReady = false;
+  }
+}
+
+ipcMain.handle('discord-available', async () => {
+  if (!DISCORD_CLIENT_ID) return false;
+  try {
+    require.resolve('discord-rpc');
+    return true;
+  } catch {
+    return false;
+  }
+});
+
+ipcMain.on('set-discord-rpc', (_e, enabled) => {
+  discordEnabled = !!enabled;
+  if (!discordEnabled && discordClient) {
+    discordClient.clearActivity().catch(() => {});
+  } else if (discordEnabled) {
+    discordUpdate(lastPlaybackState);
+  }
 });
 
 // ── Local audio library (user-editable playlist + mp3s) ───
@@ -894,6 +965,87 @@ ipcMain.handle('open-music-folder', async () => {
   await fs.promises.mkdir(dir, { recursive: true });
   await shell.openPath(dir);
   return dir;
+});
+
+// ── Drag-drop import ─────────────────────────────────────
+// Copies audio files into the library, reads tags for title/artist/art,
+// and appends entries to playlist.json. Sources must be real files on
+// disk — only the audio extensions the player can serve are accepted.
+const IMPORTABLE_AUDIO_EXT = new Set(['.mp3', '.m4a', '.aac', '.flac', '.wav', '.ogg', '.opus']);
+const IMPORT_ART_EXT = { jpeg: '.jpg', png: '.png', webp: '.webp', gif: '.gif' };
+
+ipcMain.handle('import-audio-files', async (_e, paths) => {
+  if (!Array.isArray(paths)) return { added: [], skipped: [] };
+  const dir = userAudioDir();
+  await fs.promises.mkdir(dir, { recursive: true });
+  const added = [];
+  const skipped = [];
+
+  for (const src of paths.slice(0, 50)) {
+    try {
+      if (typeof src !== 'string' || !path.isAbsolute(src)) { skipped.push(src); continue; }
+      const ext = path.extname(src).toLowerCase();
+      if (!IMPORTABLE_AUDIO_EXT.has(ext)) { skipped.push(src); continue; }
+      const stat = await fs.promises.stat(src);
+      if (!stat.isFile()) { skipped.push(src); continue; }
+
+      // Collision-safe destination name: "song.mp3" → "song (2).mp3"
+      const base = path.basename(src, ext);
+      let destName = `${base}${ext}`;
+      for (let i = 2; fs.existsSync(path.join(dir, destName)); i++) {
+        destName = `${base} (${i})${ext}`;
+      }
+      const dest = path.join(dir, destName);
+      await fs.promises.copyFile(src, dest);
+
+      // Tag metadata — fall back to "Artist - Title" filename split
+      let meta = {};
+      try {
+        const { parseFile } = await import('music-metadata');
+        meta = await parseFile(dest);
+      } catch { /* untagged file — filename fallback below */ }
+      const fileTitle = base.includes(' - ')
+        ? base.split(' - ').slice(1).join(' - ').trim()
+        : base;
+      const fileArtist = base.includes(' - ') ? base.split(' - ')[0].trim() : '';
+
+      // Embedded art → song photos/<name>.<ext> like the seeded library
+      let art = null;
+      const pic = meta.common?.picture?.[0];
+      if (pic) {
+        const artExt = IMPORT_ART_EXT[(pic.format || '').replace('image/', '')] || '.jpg';
+        const artDir = path.join(dir, 'song photos');
+        await fs.promises.mkdir(artDir, { recursive: true });
+        let artName = `${base}${artExt}`;
+        for (let i = 2; fs.existsSync(path.join(artDir, artName)); i++) {
+          artName = `${base} (${i})${artExt}`;
+        }
+        await fs.promises.writeFile(path.join(artDir, artName), pic.data);
+        art = `song photos/${artName}`;
+      }
+
+      added.push({
+        file: destName,
+        title: meta.common?.title || fileTitle,
+        artist: meta.common?.artist || fileArtist,
+        album: meta.common?.album || '',
+        ...(art ? { art } : {}),
+      });
+    } catch (err) {
+      console.warn('[import]', src, err.message);
+      skipped.push(src);
+    }
+  }
+
+  if (added.length) {
+    let list = [];
+    try {
+      list = JSON.parse(await fs.promises.readFile(userPlaylistFile(), 'utf8'));
+      if (!Array.isArray(list)) list = [];
+    } catch { /* create a fresh playlist.json */ }
+    await fs.promises.writeFile(userPlaylistFile(), JSON.stringify([...list, ...added], null, 2));
+  }
+  return { added, skipped };
 });
 
 // Resolve a relative filename inside the audio dir — shared safety check.

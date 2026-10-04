@@ -118,6 +118,9 @@ export function PlaylistList({ loading, playlists, loadingPlaylist, onSelect, em
  */
 export default function SettingsPanel({
   theme, onTheme,
+  customHue, onCustomHue,
+  queue,
+  discord,
   eqGains, onEqChange,
   sleepMins, onSleepChange,
   musicService, onMusicService,
@@ -130,6 +133,34 @@ export default function SettingsPanel({
   return (
     <div className="settings-panel">
       <div className="settings-panel-inner">
+        {queue && queue.tracks.length > 0 && (
+          <>
+            <div className="settings-label">queue</div>
+            <div className="queue-list">
+              {queue.tracks.map((t, i) => (
+                <div key={`${t.title}-${i}`} className="side-row">
+                  <button
+                    className={`side-item grow ${i === queue.index ? 'active' : ''}`}
+                    onClick={() => queue.onJump(i)}
+                  >
+                    {i === queue.index ? '♥ ' : ''}{t.title}
+                    <span className="side-dim"> — {t.artist}</span>
+                  </button>
+                  {!queue.guest && queue.tracks.length > 1 && (
+                    <button
+                      className="settings-theme-btn danger"
+                      title="remove from queue"
+                      onClick={() => queue.onRemove(i)}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
         <div className="settings-label">theme</div>
         <div className="settings-theme-row">
           {THEMES.map((t) => (
@@ -142,6 +173,33 @@ export default function SettingsPanel({
             </button>
           ))}
         </div>
+        {theme === 'custom' && (
+          <div className="hue-picker">
+            <input
+              type="range"
+              className="hue-slider"
+              min="0"
+              max="359"
+              value={customHue}
+              onChange={(e) => onCustomHue(Number(e.target.value))}
+              aria-label="custom theme hue"
+            />
+            <span className="settings-label">hue {customHue}°</span>
+          </div>
+        )}
+
+        {discord?.available && (
+          <>
+            <div className="settings-label">discord</div>
+            <button
+              className={`settings-theme-btn ${discord.enabled ? 'active' : ''}`}
+              onClick={() => discord.onToggle(!discord.enabled)}
+            >
+              rich presence: {discord.enabled ? 'on' : 'off'}
+            </button>
+          </>
+        )}
+
         <div className="settings-label">eq</div>
         <EqPanel gains={eqGains} onChange={onEqChange} />
         <div className="settings-label">sleep timer</div>
@@ -355,6 +413,11 @@ export default function SettingsPanel({
             )}
           </>
         )}
+
+        <div className="settings-label">keys</div>
+        <div className="side-hint">
+          space play · ←/→ seek · ↑/↓ volume · n/p next/prev · m mute · t theme
+        </div>
 
         {error && <div className="settings-error">{error}</div>}
       </div>
