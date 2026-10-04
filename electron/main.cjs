@@ -1,11 +1,12 @@
 require('dotenv').config();
-const { app, BrowserWindow, ipcMain, screen, shell, protocol, net } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, shell, net, Tray, Menu, nativeImage } = require('electron');
 const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { Readable } = require('node:stream');
 const http = require('node:http');
+const crypto = require('node:crypto');
 const os = require('node:os');
 
 const fs = require('node:fs');
@@ -13,9 +14,20 @@ const jwt = require('jsonwebtoken');
 
 const execFileAsync = promisify(execFile);
 
-// CORS for custom protocol responses — required once the renderer routes
-// <audio> through Web Audio (MediaElementSource performs a CORS-enabled fetch).
-const CORS_HEADERS = { 'Access-Control-Allow-Origin': '*' };
+// CORS for loopback media responses — the renderer origin (vite dev server or
+// file://) is cross-origin from http://127.0.0.1:<port>, and Web Audio's
+// MediaElementSource requires CORS-clean media. Reflect only the real
+// renderer origins — never '*', or any web page could read the endpoints.
+const ALLOWED_MEDIA_ORIGINS = new Set(['null', 'http://127.0.0.1:5173']);
+function mediaCors(req) {
+  const origin = req.headers.origin;
+  return ALLOWED_MEDIA_ORIGINS.has(origin) ? { 'Access-Control-Allow-Origin': origin } : {};
+}
+
+// Every media URL carries a per-launch token — the endpoints are otherwise
+// reachable by any local process and (sans PNA, e.g. Firefox/Safari) by web
+// pages. Only renderer code sees the token (via IPC-built URLs).
+const MEDIA_TOKEN = crypto.randomBytes(16).toString('hex');
 
 // Insertion-ordered eviction so stream/video caches can't grow unbounded.
 function cacheSetBounded(map, key, value, max = 500) {
@@ -23,19 +35,222 @@ function cacheSetBounded(map, key, value, max = 500) {
   map.set(key, value);
 }
 
-// Custom protocol used by the renderer's <audio> — main fetches the actual
-// stream so we can attach headers and forward Range requests for seeking.
-// Must be registered as privileged before app.whenReady fires.
-protocol.registerSchemesAsPrivileged([
-  {
-    scheme: 'cupid-audio',
-    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true },
-  },
-  {
-    scheme: 'cupid-local',
-    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true },
-  },
-]);
+// ── Loopback media server ───────────────────────────────
+// Chromium refuses CORS-enabled requests to custom schemes, and the Web
+// Audio graph (EQ/visualizer) requires CORS-clean media — <audio> uses
+// crossOrigin='anonymous'. Serving audio over http://127.0.0.1 is CORS-legal,
+// so local files and proxied YouTube streams go through this server.
+const mediaServer = http.createServer();
+let mediaServerPort = null;
+
+function mediaBase() {
+  if (!mediaServerPort) throw new Error('media server not ready');
+  return `http://127.0.0.1:${mediaServerPort}`;
+}
+
+const MEDIA_MIME_BY_EXT = {
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+};
+
+// /local/<file> — files under userAudioDir() only, with Range support.
+// Containment is two-layer: lexical (path.resolve + root prefix, which also
+// normalizes '..') then realpath, so symlinks/junctions inside the audio
+// dir can't escape to files elsewhere on disk.
+let mediaRealRoot = null;
+async function serveLocalMedia(u, req, res, cors) {
+  const filename = decodeURIComponent(u.pathname.slice('/local/'.length));
+  const root = userAudioDir();
+  const filePath = path.resolve(root, filename);
+  const inside = filePath === root || filePath.startsWith(root + path.sep);
+  if (!filename || !inside || filename.includes('\\')) {
+    res.writeHead(403, cors);
+    res.end('forbidden');
+    return;
+  }
+  try {
+    if (mediaRealRoot) {
+      const real = await fs.promises.realpath(filePath);
+      if (real !== mediaRealRoot && !real.startsWith(mediaRealRoot + path.sep)) {
+        res.writeHead(403, cors);
+        res.end('forbidden');
+        return;
+      }
+    }
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile()) {
+      res.writeHead(404, cors);
+      res.end('not found');
+      return;
+    }
+    const total = stat.size;
+    const range = req.headers.range;
+    const contentType = MEDIA_MIME_BY_EXT[path.extname(filename).toLowerCase()] || 'application/octet-stream';
+
+    const pipeFile = (opts) => {
+      const s = fs.createReadStream(filePath, opts);
+      s.on('error', () => res.destroy());
+      res.on('close', () => s.destroy()); // client left mid-body — close the fd
+      s.pipe(res);
+    };
+
+    if (range) {
+      const match = /^bytes=(\d+)-(\d*)$/.exec(range);
+      const suffix = /^bytes=-(\d+)$/.exec(range);
+      if (!match && !suffix) {
+        res.writeHead(416, { 'Content-Range': `bytes */${total}`, ...cors });
+        res.end();
+        return;
+      }
+      const start = match ? parseInt(match[1], 10) : Math.max(0, total - parseInt(suffix[1], 10));
+      const end = match && match[2] ? Math.min(parseInt(match[2], 10), total - 1) : total - 1;
+      if (start > end) {
+        res.writeHead(416, { 'Content-Range': `bytes */${total}`, ...cors });
+        res.end();
+        return;
+      }
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${total}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': String(end - start + 1),
+        'Content-Type': contentType,
+        ...cors,
+      });
+      pipeFile({ start, end });
+      return;
+    }
+
+    res.writeHead(200, {
+      'Accept-Ranges': 'bytes',
+      'Content-Length': String(total),
+      'Content-Type': contentType,
+      ...cors,
+    });
+    pipeFile();
+  } catch (err) {
+    console.error('[media local]', err.message);
+    res.writeHead(404, cors);
+    res.end('not found');
+  }
+}
+
+// /stream?id=<videoId> — resolve via yt-dlp cache, then proxy the YouTube
+// URL with the headers it requires (Origin/Referer/UA), forwarding Range.
+async function serveStreamMedia(u, req, res, cors) {
+  const id = u.searchParams.get('id');
+  if (!id || !YT_ID_RE.test(id)) {
+    res.writeHead(400, cors);
+    res.end('missing id');
+    return;
+  }
+  // Each novel videoId can spawn a yt-dlp resolve — cap in-flight resolves
+  // so a hostile local caller can't fork-bomb the host through us.
+  if (pendingDecipher.size >= 6 && !decipheredCache.has(id)) {
+    res.writeHead(429, cors);
+    res.end('busy');
+    return;
+  }
+  try {
+    const streamUrl = await resolveStreamUrl(id);
+    const headers = {
+      Origin: 'https://www.youtube.com',
+      Referer: 'https://www.youtube.com/',
+      'User-Agent': 'Mozilla/5.0',
+    };
+    if (req.headers.range) headers.Range = req.headers.range;
+    const ctrl = new AbortController();
+    req.on('close', () => ctrl.abort()); // client left — stop upstream download
+    const upstream = await net.fetch(streamUrl, {
+      headers,
+      signal: AbortSignal.any([ctrl.signal, AbortSignal.timeout(30_000)]),
+    });
+    if (!upstream.body) {
+      res.writeHead(502, cors);
+      res.end('no body');
+      return;
+    }
+    const pass = {};
+    for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
+      const v = upstream.headers.get(h);
+      if (v) pass[h] = v;
+    }
+    // bestaudio isn't always m4a (e.g. webm/opus) — pass the real type through
+    if (!pass['content-type']) pass['content-type'] = 'audio/mp4';
+    res.writeHead(upstream.status, { ...pass, ...cors });
+    const body = Readable.fromWeb(upstream.body);
+    body.on('error', () => res.destroy());
+    body.pipe(res);
+  } catch (err) {
+    console.error('[media stream]', err.message);
+    if (!res.headersSent) res.writeHead(502, cors);
+    res.end('failed');
+  }
+}
+
+mediaServer.on('request', async (req, res) => {
+  const cors = mediaCors(req);
+  try {
+    const u = new URL(req.url, 'http://127.0.0.1');
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        ...cors,
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'Range',
+      });
+      res.end();
+      return;
+    }
+    if (req.method !== 'GET') {
+      res.writeHead(405, cors);
+      res.end();
+      return;
+    }
+    if (u.searchParams.get('key') !== MEDIA_TOKEN) {
+      res.writeHead(401, cors);
+      res.end('unauthorized');
+      return;
+    }
+    if (u.pathname === '/stream') {
+      await serveStreamMedia(u, req, res, cors);
+      return;
+    }
+    if (u.pathname.startsWith('/local/')) {
+      await serveLocalMedia(u, req, res, cors);
+      return;
+    }
+    res.writeHead(404, cors);
+    res.end('not found');
+  } catch (err) {
+    console.error('[media]', err.message);
+    if (!res.headersSent) res.writeHead(500, mediaCors(req));
+    res.end();
+  }
+});
+
+async function startMediaServer() {
+  // Realpath of the served root — the second containment layer in
+  // serveLocalMedia. If the dir doesn't exist yet, fall back to lexical
+  // only (requests 404 anyway until files land).
+  try { mediaRealRoot = await fs.promises.realpath(userAudioDir()); } catch { /* unseeded yet */ }
+  return new Promise((resolve, reject) => {
+    mediaServer.once('error', reject);
+    // Port 0 → OS picks a free one; loopback only.
+    mediaServer.listen(0, '127.0.0.1', () => {
+      mediaServerPort = mediaServer.address().port;
+      mediaServer.removeListener('error', reject);
+      resolve();
+    });
+  });
+}
 
 // ── Apple Music developer token ──────────────────────────
 let appleMusicToken = null;
@@ -287,10 +502,10 @@ async function getStreamUrl(title, artist) {
         persistVideoIdCache();
       }
 
-      // Best-effort pre-warm so the renderer's protocol fetch hits the decipher cache
+      // Best-effort pre-warm so the renderer's media request hits the decipher cache
       resolveStreamUrl(videoId).catch(() => {});
 
-      const url = `cupid-audio://stream?id=${encodeURIComponent(videoId)}`;
+      const url = `${mediaBase()}/stream?id=${encodeURIComponent(videoId)}&key=${MEDIA_TOKEN}`;
       cacheSetBounded(streamCache, cacheKey, { url, time: Date.now() });
       return url;
     } finally {
@@ -302,12 +517,12 @@ async function getStreamUrl(title, artist) {
   return promise;
 }
 
-// Direct cupid-audio URL for a known YouTube video ID — skips the search step
+// Direct stream URL for a known YouTube video ID — skips the search step
 // used by Spotify/Apple. Best-effort pre-warms the decipher cache.
 function streamUrlForVideoId(videoId) {
   if (!YT_ID_RE.test(videoId)) throw new Error('Invalid YouTube video ID');
   resolveStreamUrl(videoId).catch(() => {});
-  return `cupid-audio://stream?id=${encodeURIComponent(videoId)}`;
+  return `${mediaBase()}/stream?id=${encodeURIComponent(videoId)}&key=${MEDIA_TOKEN}`;
 }
 
 // Fetch a public/unlisted YouTube playlist via yt-dlp --flat-playlist.
@@ -334,6 +549,32 @@ async function fetchYouTubePlaylistViaYtDlp(url) {
 }
 
 const isDev = process.env.NODE_ENV === 'development';
+
+// ── Windows integration (tray, taskbar thumbnail toolbar, progress) ──
+// All transport clicks are forwarded to the renderer as 'media-command'
+// events — it owns the real semantics (room guests forward, etc.).
+let tray = null;
+let updateThumbar = null;
+let lastPlaybackState = { isPlaying: false };
+let mainWindow = null; // the player window — OAuth modals are separate windows
+
+function sendMediaCommand(op) {
+  mainWindow?.webContents.send('media-command', op);
+}
+
+// Renderer pushes { isPlaying, title, progress } here; we mirror it onto
+// the taskbar thumbnail toolbar, taskbar progress bar, and tray tooltip.
+ipcMain.on('playback-state', (_e, s) => {
+  if (!s || typeof s !== 'object') return;
+  lastPlaybackState = s;
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  if (updateThumbar) updateThumbar(!!s.isPlaying);
+  const p = typeof s.progress === 'number' && Number.isFinite(s.progress) && s.progress >= 0
+    ? Math.min(1, s.progress) : -1;
+  win.setProgressBar(s.isPlaying ? p : -1);
+  if (tray) tray.setToolTip(s.title ? `cupid — ${s.title}` : 'cupid player');
+});
 
 // ── Local audio library (user-editable playlist + mp3s) ───
 // In dev: read/write directly from the project's audio/ folder so edits
@@ -389,6 +630,26 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+
+  // Taskbar thumbnail toolbar — Windows only; icon PNGs are the pink set
+  // (thumbnail buttons are tiny, the theme difference doesn't read).
+  if (process.platform === 'win32') {
+    const icon = (n) => nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'pink', n));
+    const build = (isPlaying) => {
+      if (win.isDestroyed()) return;
+      win.setThumbarButtons([
+        { tooltip: 'previous', icon: icon('backwards_button.png'), click: () => sendMediaCommand('prev') },
+        { tooltip: isPlaying ? 'pause' : 'play', icon: icon(isPlaying ? 'pause_button.png' : 'play_button.png'), click: () => sendMediaCommand('toggle') },
+        { tooltip: 'next', icon: icon('forwards_button.png'), click: () => sendMediaCommand('next') },
+      ]);
+    };
+    build(lastPlaybackState.isPlaying);
+    updateThumbar = build;
+    win.on('closed', () => { updateThumbar = null; });
+  }
+
+  mainWindow = win;
+  win.on('closed', () => { if (mainWindow === win) mainWindow = null; });
 
   // Lock aspect ratio so only proportional resizing is allowed
   const ASPECT = WIDTH / HEIGHT;
@@ -515,11 +776,20 @@ function createWindow() {
 
   const onSetTheme = (_e, theme) => {
     if (typeof theme !== 'string' || /[/\\]|\.\./.test(theme)) return;
-    const iconPath = path.join(__dirname, '..', 'assets', theme, 'favicon.png');
-    if (process.platform === 'darwin' && app.dock) {
-      app.dock.setIcon(iconPath);
+    try {
+      let iconPath = path.join(__dirname, '..', 'assets', theme, 'favicon.png');
+      // Only pink/blue have real asset dirs — mint/lavender are CSS hue-shifts,
+      // so fall back to the pink icon rather than throwing a dialog.
+      if (!fs.existsSync(iconPath)) {
+        iconPath = path.join(__dirname, '..', 'assets', 'pink', 'favicon.png');
+      }
+      if (process.platform === 'darwin' && app.dock) {
+        app.dock.setIcon(iconPath);
+      }
+      win.setIcon(iconPath);
+    } catch {
+      // Icon theming is cosmetic — never crash the main process over it.
     }
-    win.setIcon(iconPath);
   };
 
   ipcMain.on('window-minimize', onMinimize);
@@ -613,10 +883,10 @@ ipcMain.handle('get-local-audio-path', (_e, filename) => {
     return null;
   }
   // Convert to forward slashes — path.normalize produces '\' on Windows, which
-  // the cupid-local handler rejects. Use a custom protocol so the dev renderer
+  // the media server rejects. Served over loopback http so the dev renderer
   // (served over http://) can play it — <audio> won't load file:// cross-origin.
   const posixPath = normalized.split(path.sep).join('/');
-  return `cupid-local://audio/${encodeURIComponent(posixPath)}`;
+  return `${mediaBase()}/local/${encodeURIComponent(posixPath)}?key=${MEDIA_TOKEN}`;
 });
 
 ipcMain.handle('open-music-folder', async () => {
@@ -627,12 +897,23 @@ ipcMain.handle('open-music-folder', async () => {
 });
 
 // Resolve a relative filename inside the audio dir — shared safety check.
-function resolveLocalAudioFile(filename) {
+// Lexical containment plus a realpath check so a symlink/junction inside
+// the audio dir can't point file reads at the rest of the disk.
+async function resolveLocalAudioFile(filename) {
   if (typeof filename !== 'string' || !filename) return null;
   const normalized = path.normalize(filename);
   if (normalized.startsWith('..') || path.isAbsolute(normalized)) return null;
-  const base = isDev ? path.join(__dirname, '..', 'audio') : userAudioDir();
-  return path.join(base, normalized);
+  const base = userAudioDir();
+  const filePath = path.resolve(base, normalized);
+  if (filePath !== path.resolve(base) && !filePath.startsWith(path.resolve(base) + path.sep)) return null;
+  try {
+    const realBase = await fs.promises.realpath(base);
+    const real = await fs.promises.realpath(filePath);
+    if (real !== realBase && !real.startsWith(realBase + path.sep)) return null;
+  } catch {
+    return null; // missing file or unreadable link — treat as not found
+  }
+  return filePath;
 }
 
 // ── User playlists ────────────────────────────────────────
@@ -666,7 +947,7 @@ ipcMain.handle('playlists-save', async (_e, playlists) => {
 // music-metadata is ESM-only → dynamic import. Returns a data URL so the
 // renderer can use it directly as an <img> src.
 ipcMain.handle('get-embedded-art', async (_e, filename) => {
-  const file = resolveLocalAudioFile(filename);
+  const file = await resolveLocalAudioFile(filename);
   if (!file) return null;
   try {
     const { parseFile } = await import('music-metadata');
@@ -707,7 +988,7 @@ ipcMain.handle('get-lyrics', async (_e, track) => {
   if (!track?.title) return null;
 
   if (track.file) {
-    const file = resolveLocalAudioFile(track.file);
+    const file = await resolveLocalAudioFile(track.file);
     if (file) {
       // Sidecar .lrc next to the audio file
       const lrcPath = file.replace(/\.[^.]+$/, '.lrc');
@@ -843,7 +1124,7 @@ ipcMain.handle('room-host', () => {
       ws.on('message', (d) => {
         try {
           const msg = JSON.parse(d);
-          BrowserWindow.getAllWindows()[0]?.webContents.send('room-command', msg);
+          mainWindow?.webContents.send('room-command', msg);
         } catch { /* malformed message */ }
       });
     });
@@ -1015,120 +1296,69 @@ ipcMain.handle('youtube-oauth-cancel', () => {
   }
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Needed for Windows toast notifications (track changes) to be attributed
+  // to the app instead of "Electron". Also what jump lists/SMTC hang off.
+  app.setAppUserModelId('com.codedbycupidity.cupid-player'); // must match build.appId
+
   if (process.platform === 'darwin' && app.dock) {
     app.dock.setIcon(path.join(__dirname, '..', 'assets', 'pink', 'favicon.png'));
+  }
+
+  if (process.platform === 'win32') {
+    const trayIcon = nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'pink', 'favicon.png'));
+    if (!trayIcon.isEmpty()) {
+      tray = new Tray(trayIcon);
+      tray.setToolTip('cupid player');
+      const toggleWindow = () => {
+        const w = mainWindow;
+        if (!w) return;
+        if (w.isMinimized()) { w.restore(); w.show(); }
+        else if (w.isVisible()) { w.hide(); }
+        else { w.show(); }
+      };
+      tray.on('click', toggleWindow);
+      tray.setContextMenu(Menu.buildFromTemplate([
+        { label: 'show / hide', click: toggleWindow },
+        { type: 'separator' },
+        { label: 'play / pause', click: () => sendMediaCommand('toggle') },
+        { label: 'previous', click: () => sendMediaCommand('prev') },
+        { label: 'next', click: () => sendMediaCommand('next') },
+        { type: 'separator' },
+        { label: 'quit', click: () => app.quit() },
+      ]));
+    }
+  }
+
+  // Auto-update from GitHub releases — packaged builds only.
+  if (!isDev) {
+    import('electron-updater')
+      .then(({ autoUpdater }) => autoUpdater.checkForUpdatesAndNotify())
+      .catch(() => {});
   }
 
   // Seed is async — tell the renderer when it lands so it can reload the
   // local playlist (first-launch race: renderer would otherwise see an
   // empty library until manual reload).
   seedUserAudioDirIfMissing()
-    .then(() => BrowserWindow.getAllWindows()[0]?.webContents.send('audio-seeded'))
+    .then(() => mainWindow?.webContents.send('audio-seeded'))
     .catch((err) => console.warn('[seed]', err.message));
 
-  protocol.handle('cupid-local', async (request) => {
-    try {
-      const u = new URL(request.url);
-      const filename = decodeURIComponent(u.pathname.replace(/^\//, ''));
-      if (!filename || filename.includes('..') || filename.includes('\\')) {
-        return new Response('forbidden', { status: 403, headers: CORS_HEADERS });
-      }
-      const filePath = path.join(userAudioDir(), filename);
-      const stat = await fs.promises.stat(filePath);
-      const total = stat.size;
-      const range = request.headers.get('Range');
-
-      const ext = path.extname(filename).toLowerCase();
-      const mimeByExt = {
-        '.mp3': 'audio/mpeg',
-        '.m4a': 'audio/mp4',
-        '.aac': 'audio/aac',
-        '.flac': 'audio/flac',
-        '.wav': 'audio/wav',
-        '.ogg': 'audio/ogg',
-        '.opus': 'audio/ogg',
-      };
-      const contentType = mimeByExt[ext] || 'application/octet-stream';
-
-      if (range) {
-        const match = /bytes=(\d+)-(\d*)/.exec(range);
-        const start = match ? parseInt(match[1], 10) : 0;
-        const end = match && match[2] ? Math.min(parseInt(match[2], 10), total - 1) : total - 1;
-        if (start > end) {
-          return new Response(null, {
-            status: 416,
-            headers: { 'Content-Range': `bytes */${total}`, ...CORS_HEADERS },
-          });
-        }
-        const nodeStream = fs.createReadStream(filePath, { start, end });
-        return new Response(Readable.toWeb(nodeStream), {
-          status: 206,
-          headers: {
-            'Content-Range': `bytes ${start}-${end}/${total}`,
-            'Accept-Ranges': 'bytes',
-            'Content-Length': String(end - start + 1),
-            'Content-Type': contentType,
-            ...CORS_HEADERS,
-          },
-        });
-      }
-
-      return new Response(Readable.toWeb(fs.createReadStream(filePath)), {
-        status: 200,
-        headers: {
-          'Accept-Ranges': 'bytes',
-          'Content-Length': String(total),
-          'Content-Type': contentType,
-          ...CORS_HEADERS,
-        },
-      });
-    } catch (err) {
-      console.error('[cupid-local]', err.message);
-      return new Response('not found', { status: 404, headers: CORS_HEADERS });
-    }
-  });
-
-  protocol.handle('cupid-audio', async (request) => {
-    try {
-      const id = new URL(request.url).searchParams.get('id');
-      if (!id || !YT_ID_RE.test(id)) {
-        return new Response('missing id', { status: 400, headers: CORS_HEADERS });
-      }
-
-      const streamUrl = await resolveStreamUrl(id);
-
-      const headers = {
-        Origin: 'https://www.youtube.com',
-        Referer: 'https://www.youtube.com/',
-        'User-Agent': 'Mozilla/5.0',
-      };
-      const range = request.headers.get('Range');
-      if (range) headers.Range = range;
-
-      const upstream = await net.fetch(streamUrl, { headers });
-      const respHeaders = new Headers(upstream.headers);
-      respHeaders.set('Access-Control-Allow-Origin', '*');
-      // Pass through the real type — bestaudio isn't always m4a (e.g. webm/opus)
-      if (!respHeaders.get('content-type')) respHeaders.set('Content-Type', 'audio/mp4');
-      return new Response(upstream.body, {
-        status: upstream.status,
-        statusText: upstream.statusText,
-        headers: respHeaders,
-      });
-    } catch (err) {
-      console.error('[cupid-audio]', err.message);
-      return new Response('failed', { status: 502, headers: CORS_HEADERS });
-    }
-  });
+  // A media-server failure must not take down the app — degrade to "media
+  // endpoints 502" instead of launching to nothing.
+  try {
+    await startMediaServer();
+  } catch (err) {
+    console.error('[media server] failed to start — media playback unavailable:', err.message);
+  }
 
   createWindow();
 
   // CI smoke test (CUPID_SMOKE_TEST=1): exercises the full real path —
-  // seed, protocols, window creation, renderer load — then exits 0.
+  // seed, media server, window creation, renderer load — then exits 0.
   // The workflow kills it if it hangs, so a crash = CI failure.
   if (process.env.CUPID_SMOKE_TEST === '1') {
-    const win = BrowserWindow.getAllWindows()[0];
+    const win = mainWindow;
     const ok = (msg) => { console.log(`[smoke] ${msg}`); app.exit(0); };
     win.webContents.once('did-finish-load', () => ok('renderer loaded'));
     win.webContents.once('did-fail-load', (_e, code, desc) => {
@@ -1143,8 +1373,10 @@ app.whenReady().then(() => {
   execFile(getYtDlpPath(), ['--version'], () => {});
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (!mainWindow) createWindow();
   });
+}).catch((err) => {
+  console.error('[startup] fatal error during initialization:', err);
 });
 
 app.on('window-all-closed', () => {
@@ -1158,4 +1390,5 @@ app.on('will-quit', () => {
   if (roomTunnelProc) { try { roomTunnelProc.kill(); } catch {} roomTunnelProc = null; }
   if (roomWss) { try { roomWss.close(); } catch {} roomWss = null; }
   if (activeOauth) { try { activeOauth.server.close(); } catch {} activeOauth = null; }
+  try { mediaServer.close(); } catch {}
 });

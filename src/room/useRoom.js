@@ -68,9 +68,9 @@ export default function useRoom({ getPlayerState, playerRef, playTrackList }) {
         window.cupid.roomBroadcast({
           type: 'state',
           // art can be a multi-MB data URL (embedded art) or a
-          // cupid-local:// URL that only resolves on this machine —
+          // 127.0.0.1 media-server URL that only resolves on this machine —
           // only forward real remote art
-          track: { ...s.track, art: s.track.art?.startsWith('http') ? s.track.art : null },
+          track: { ...s.track, art: /^https:\/\//.test(s.track.art) ? s.track.art : null },
           position: s.currentTime,
           isPlaying: s.isPlaying,
           sentAt: Date.now(),

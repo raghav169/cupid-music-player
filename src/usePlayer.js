@@ -30,9 +30,15 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
   // startAtRef can hold { index, autoPlay, seekTo, playing } to land on a
   // specific track (e.g. clicking a song, or a room guest joining mid-song)
   // instead of resetting to 0.
+  // IMPORTANT: consumption happens in an effect, not during render — a
+  // discarded render (StrictMode/concurrent) would otherwise consume the
+  // refs without committing the index reset, permanently desyncing.
   const prevTracksRef = useRef(tracks);
   const pendingStartRef = useRef(null);
-  if (prevTracksRef.current !== tracks) {
+  const trackIndexRef = useRef(trackIndex);
+  trackIndexRef.current = trackIndex;
+  useEffect(() => {
+    if (prevTracksRef.current === tracks) return;
     prevTracksRef.current = tracks;
     nextIdxRef.current = null;
     const start = startAtRef?.current;
@@ -41,10 +47,11 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       ? { seekTo: start.seekTo, playing: start.playing ?? (start.autoPlay ? true : undefined) }
       : null;
     const idx = start && start.index > 0 && start.index < tracks.length ? start.index : 0;
-    if (trackIndex !== idx) setTrackIndex(idx);
+    if (trackIndexRef.current !== idx) setTrackIndex(idx);
     if (start?.playing === false) setIsPlaying(false);
     else if (start?.autoPlay) setIsPlaying(true);
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tracks]);
   // Ref so the async load effect sees the latest value when it resolves,
   // not the one captured when it started
   const isPlayingRef = useRef(false);
@@ -53,6 +60,7 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [playError, setPlayError] = useState(null);
   const [resolvedArt, setResolvedArt] = useState(null);
   const [volume, setVolumeState] = useState(() => {
     try {
@@ -82,6 +90,10 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       setResolvedArt(null);
       setLoading(false);
       setIsPlaying(false);
+      setPlayError(null);
+      setProgress(0);
+      setCurrentTime(0);
+      setDuration(0);
       audio.removeAttribute('src');
       audio.load();
       return;
@@ -90,6 +102,13 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     let cancelled = false;
     setLoading(true);
     setResolvedArt(null);
+    setPlayError(null);
+    // Reset synchronously — "loaded" gates elsewhere (e.g. recordPlay's
+    // duration > 0 check) must not see the previous track's duration
+    // while the new track is still loading.
+    setProgress(0);
+    setCurrentTime(0);
+    setDuration(0);
 
     (async () => {
       try {
@@ -99,9 +118,6 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
         if (!res?.src) throw new Error('no playable source');
         // setting src triggers loading; an explicit audio.load() would reset it
         audio.src = res.src;
-        setProgress(0);
-        setCurrentTime(0);
-        setDuration(0);
         const pending = pendingStartRef.current;
         pendingStartRef.current = null;
         // Room guests join mid-song — seek once metadata lands (setting
@@ -124,6 +140,7 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       } catch (err) {
         if (cancelled) return;
         console.error('Failed to load track:', err.message);
+        setPlayError(err.message || 'load failed');
         // Unload fully — the previous track must not keep sounding
         // under the new title
         audio.removeAttribute('src');
@@ -182,10 +199,22 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       if (audio.duration) {
         setProgress(audio.currentTime / audio.duration);
       }
+      pushPositionState();
     };
 
     const onLoadedMetadata = () => {
       setDuration(audio.duration);
+    };
+
+    // Position for the OS media overlay (SMTC) — scrubbing works there
+    const pushPositionState = () => {
+      try {
+        navigator.mediaSession?.setPositionState({
+          duration: Number.isFinite(audio.duration) ? audio.duration : 0,
+          playbackRate: 1,
+          position: Math.min(audio.currentTime, audio.duration || 0),
+        });
+      } catch { /* position must not exceed duration — just skip */ }
     };
 
     const onEnded = () => {
@@ -211,14 +240,25 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       });
     };
 
+    const onError = () => {
+      // Media errors (bad src, decode failure, CORS reject) fire async after
+      // src is set — without this the UI sat on "playing" at 0:00 forever.
+      if (!audio.getAttribute('src')) return;
+      setPlayError(audio.error?.message || 'track failed to load');
+      setIsPlaying(false);
+      audio.pause();
+    };
+
     audio.addEventListener('timeupdate', onTimeUpdate);
     audio.addEventListener('loadedmetadata', onLoadedMetadata);
     audio.addEventListener('ended', onEnded);
+    audio.addEventListener('error', onError);
 
     return () => {
       audio.removeEventListener('timeupdate', onTimeUpdate);
       audio.removeEventListener('loadedmetadata', onLoadedMetadata);
       audio.removeEventListener('ended', onEnded);
+      audio.removeEventListener('error', onError);
     };
   }, [tracks.length]);
 
@@ -294,6 +334,27 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     });
   }, [volume, audio]);
 
+  // MediaSession action handlers live in App.jsx — they must route through
+  // room-aware transport (a guest's media keys forward to the host).
+
+  // Track metadata + playing state for the OS overlay
+  useEffect(() => {
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    try {
+      const art = track.art;
+      ms.metadata = new MediaMetadata({
+        title: track.title ?? '',
+        artist: track.artist ?? '',
+        album: track.album ?? '',
+        // Loopback (127.0.0.1) art only resolves inside this app — the shell
+        // fetches artwork itself, so only send genuinely remote/data URLs.
+        artwork: art && (/^https:\/\//.test(art) || art.startsWith('data:')) ? [{ src: art }] : [],
+      });
+      ms.playbackState = isPlaying ? 'playing' : 'paused';
+    } catch { /* mediaSession is cosmetic */ }
+  }, [track.title, track.artist, track.album, track.art, isPlaying]);
+
   return {
     track,
     trackIndex,
@@ -310,6 +371,7 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     muted,
     toggleMute,
     loading,
+    playError,
     engine,
   };
 }

@@ -49,7 +49,8 @@ jobs:
           exit $p.ExitCode
       
       # Playwright drives the real unpacked exe: window-mode toggle, panel
-      # render checks, userData seed, cupid-local protocol — with screenshots.
+      # render checks, userData seed, loopback media server (art + real
+      # crossOrigin audio load + seek) — with screenshots.
       - name: Playwright smoke + screenshots
         run: node tests/electron-smoke.cjs
       

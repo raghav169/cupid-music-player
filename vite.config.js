@@ -2,15 +2,15 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 // CSP for packaged builds only — dev needs inline scripts + ws for HMR.
-// The cupid-local/cupid-audio schemes are registered with bypassCSP so media
-// still flows; remote art and service APIs go through https.
+// Media comes from the loopback media server (http://127.0.0.1:<port>) —
+// http: covers it; remote art and service APIs go through https.
 const CSP = [
   "default-src 'self'",
   "script-src 'self' https://js-cdn.music.apple.com",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: https: cupid-local:", // album art via custom scheme
-  "media-src 'self' cupid-local: cupid-audio:",
-  "connect-src 'self' https: wss: ws:", // ws: for Listen Together LAN rooms
+  "img-src 'self' data: https: http://127.0.0.1:*", // album art incl. loopback
+  "media-src 'self' http://127.0.0.1:*",
+  "connect-src 'self' https: wss: ws: http://127.0.0.1:*", // ws: for Listen Together LAN rooms
   "font-src 'self' data:",
   "frame-src https://*.apple.com https://*.music.apple.com",
 ].join('; ');

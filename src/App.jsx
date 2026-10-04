@@ -177,6 +177,7 @@ export default function App() {
     muted,
     toggleMute,
     loading: trackLoading,
+    playError,
   } = player;
 
   // Ref so timers (sleep fade) always see the latest player controls
@@ -187,10 +188,12 @@ export default function App() {
   const { playlists, create: createPlaylist, remove: deletePlaylist, addTrack: addToPlaylist, removeTrack } = usePlaylists();
   const { recents, recordPlay } = useStats();
 
+  // Only count a play once the media actually loaded — a track that errors
+  // out (bad src, failed stream) shouldn't land in recents or play counts.
   useEffect(() => {
-    if (isPlaying && track?.title && track.title !== 'No track') recordPlay(track);
+    if (isPlaying && duration > 0 && track?.title && track.title !== 'No track') recordPlay(track);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlaying, track?.source, track?.title, track?.artist]);
+  }, [isPlaying, duration > 0, track?.source, track?.title, track?.artist]);
 
   const searchAll = useCallback(async (q) => {
     const ql = q.toLowerCase();
@@ -257,6 +260,65 @@ export default function App() {
     playTrackList(tracks, index);
   }, [room.role, room.command, playTrackList]);
   const playTrackUi = useCallback((t) => playTrackListUi([t], 0), [playTrackListUi]);
+
+  // ── OS integration: taskbar/tray state + transport commands back ──
+  // Pushes {isPlaying, title, progress} to main → taskbar thumbnail buttons,
+  // taskbar progress bar, tray tooltip.
+  useEffect(() => {
+    window.cupid?.setPlaybackState?.({ isPlaying, title: track?.title, progress });
+  }, [isPlaying, track?.title, progress]);
+
+  // Taskbar buttons / tray menu / OS media keys arrive as 'media-command';
+  // OS media keys (SMTC/MediaSession) go through the same routing. The ref
+  // keeps both subscriptions stable while room-mode transport (guest →
+  // forward to host) stays live.
+  const transportRef = useRef({ doTogglePlay, doNext, doPrev, doSeek, duration, isPlaying });
+  transportRef.current = { doTogglePlay, doNext, doPrev, doSeek, duration, isPlaying };
+  useEffect(() => {
+    return window.cupid?.onMediaCommand?.((op) => {
+      const t = transportRef.current;
+      if (op === 'toggle') t.doTogglePlay();
+      else if (op === 'next') t.doNext();
+      else if (op === 'prev') t.doPrev();
+    });
+  }, []);
+
+  // OS media keys / lock-screen transport — same room-aware routing as the
+  // taskbar buttons (a guest's media keys forward to the host).
+  useEffect(() => {
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    const t = () => transportRef.current;
+    // 'play'/'pause' are states, not toggles — ignore ones already satisfied
+    try { ms.setActionHandler('play', () => { if (!t().isPlaying) t().doTogglePlay(); }); } catch {}
+    try { ms.setActionHandler('pause', () => { if (t().isPlaying) t().doTogglePlay(); }); } catch {}
+    try { ms.setActionHandler('nexttrack', () => t().doNext()); } catch {}
+    try { ms.setActionHandler('previoustrack', () => t().doPrev()); } catch {}
+    try {
+      ms.setActionHandler('seekto', (d) => {
+        if (typeof d.seekTime === 'number' && t().duration > 0) t().doSeek(d.seekTime / t().duration);
+      });
+    } catch {}
+    return () => {
+      for (const a of ['play', 'pause', 'nexttrack', 'previoustrack', 'seekto']) {
+        try { ms.setActionHandler(a, null); } catch {}
+      }
+    };
+  }, []);
+
+  // Track-change toast when the window isn't focused (Windows action center)
+  const prevTrackKeyRef = useRef(null);
+  useEffect(() => {
+    if (!track?.title || track.title === 'No track') return;
+    const key = `${track.title}::${track.artist}`;
+    if (prevTrackKeyRef.current === key) return;
+    prevTrackKeyRef.current = key;
+    if (document.hasFocus() || typeof Notification === 'undefined') return;
+    try {
+      const icon = track.art && (/^https?:\/\//.test(track.art) || track.art.startsWith('data:')) ? track.art : undefined;
+      new Notification(track.title, { body: track.artist || 'cupid player', icon, silent: true });
+    } catch { /* notifications are cosmetic */ }
+  }, [track?.title, track?.artist, track?.art]);
 
   // ── EQ ───────────────────────────────────────────────────
   const [eqGains, setEqGains] = useState(() => {
@@ -684,7 +746,7 @@ export default function App() {
       <div className="now-playing">
         <div className="track-info">
           <div className="now-playing-label">
-            {trackLoading ? 'loading...' : 'now playing...'}
+            {playError ? 'couldn\'t play this one :(' : trackLoading ? 'loading...' : 'now playing...'}
           </div>
           <MarqueeText className="track-title" text={track.title} />
           <div className="track-artist">by {track.artist}</div>
