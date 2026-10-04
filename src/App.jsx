@@ -288,7 +288,12 @@ export default function App() {
   // keeps both subscriptions stable while room-mode transport (guest →
   // forward to host) stays live.
   const transportRef = useRef({ doTogglePlay, doNext, doPrev, doSeek, duration, isPlaying, currentTime, volume, setVolume, toggleMute, toggleTheme });
-  transportRef.current = { doTogglePlay, doNext, doPrev, doSeek, duration, isPlaying, currentTime, volume, setVolume, toggleMute, toggleTheme };
+  transportRef.current = {
+    doTogglePlay, doNext, doPrev, doSeek, duration, isPlaying, currentTime, volume, setVolume, toggleMute, toggleTheme,
+    // Seek math reads the live audio element — the ~4Hz currentTime state
+    // under-reports position by up to ~250ms on fast key repeats.
+    getNow: () => playerRef.current.engine?.audio?.currentTime ?? playerRef.current.currentTime ?? 0,
+  };
   useEffect(() => {
     return window.cupid?.onMediaCommand?.((op) => {
       const t = transportRef.current;
@@ -330,30 +335,35 @@ export default function App() {
       const t = transportRef.current;
       const SEEK_STEP = 5;
       const VOL_STEP = 0.05;
-      if (e.key === ' ' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const mod = e.ctrlKey || e.metaKey;
+      if ((mod) && e.key === 'ArrowRight') {
+        e.preventDefault();
+        t.doNext(); // Ctrl/Cmd+→ = next track (checked before the plain seek)
+      } else if ((mod) && e.key === 'ArrowLeft') {
+        e.preventDefault();
+        t.doPrev();
+      } else if (e.key === ' ' && !mod && !e.altKey) {
         e.preventDefault();
         t.doTogglePlay();
-      } else if (e.key === 'ArrowRight' && t.duration > 0) {
-        t.doSeek(Math.min(1, (t.currentTime + SEEK_STEP) / t.duration));
-      } else if (e.key === 'ArrowLeft' && t.duration > 0) {
-        t.doSeek(Math.max(0, (t.currentTime - SEEK_STEP) / t.duration));
-      } else if (e.key === 'ArrowUp') {
+      } else if (e.key === 'ArrowRight' && !mod && !e.altKey && t.duration > 0) {
+        e.preventDefault();
+        t.doSeek(Math.min(1, (t.getNow() + SEEK_STEP) / t.duration));
+      } else if (e.key === 'ArrowLeft' && !mod && !e.altKey && t.duration > 0) {
+        e.preventDefault();
+        t.doSeek(Math.max(0, (t.getNow() - SEEK_STEP) / t.duration));
+      } else if (e.key === 'ArrowUp' && !mod) {
         e.preventDefault();
         t.setVolume(t.volume + VOL_STEP);
-      } else if (e.key === 'ArrowDown') {
+      } else if (e.key === 'ArrowDown' && !mod) {
         e.preventDefault();
         t.setVolume(t.volume - VOL_STEP);
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'ArrowRight') {
+      } else if (e.key.toLowerCase() === 'n' && !mod && !e.altKey) {
         t.doNext();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'ArrowLeft') {
+      } else if (e.key.toLowerCase() === 'p' && !mod && !e.altKey) {
         t.doPrev();
-      } else if (e.key.toLowerCase() === 'n') {
-        t.doNext();
-      } else if (e.key.toLowerCase() === 'p') {
-        t.doPrev();
-      } else if (e.key.toLowerCase() === 'm') {
+      } else if (e.key.toLowerCase() === 'm' && !mod && !e.altKey) {
         t.toggleMute();
-      } else if (e.key.toLowerCase() === 't') {
+      } else if (e.key.toLowerCase() === 't' && !mod && !e.altKey) {
         t.toggleTheme();
       }
     };
@@ -557,7 +567,9 @@ export default function App() {
 
   const onDragOver = useCallback((e) => {
     e.preventDefault();
-    setDropActive(true);
+    // Only flatter the user when the payload actually contains files —
+    // drags of links/text shouldn't light the drop overlay
+    if (e.dataTransfer?.types?.includes('Files')) setDropActive(true);
   }, []);
   const onDragLeave = useCallback((e) => {
     if (e.currentTarget.contains(e.relatedTarget)) return;
@@ -566,6 +578,9 @@ export default function App() {
   const onDrop = useCallback(async (e) => {
     e.preventDefault();
     setDropActive(false);
+    // Guests can't touch their own library — the import + autoplay would
+    // fork them off the host's queue
+    if (room.role === 'guest') { showToast('the host controls the tunes here'); return; }
     const files = [...(e.dataTransfer?.files || [])];
     const paths = files.map((f) => {
       try { return window.cupid?.getPathForFile?.(f) || null; } catch { return null; }
@@ -590,7 +605,7 @@ export default function App() {
     } catch (err) {
       showToast(`import failed: ${err.message}`);
     }
-  }, [loadLocalPlaylist, playTrackList, showToast]);
+  }, [room.role, loadLocalPlaylist, playTrackList, showToast]);
 
   // ?mode=full forces full layout — handy for browser preview/QA
   const [winMode, setWinMode] = useState(() =>
