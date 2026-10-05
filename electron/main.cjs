@@ -794,6 +794,7 @@ function createWindow() {
   const onSetStage = (_e, on) => {
     if (win.isDestroyed()) return;
     if (on) {
+      if (stagePrevMode !== null) return; // already staged (key repeat / double-press)
       stagePrevMode = isFullMode ? 'full' : 'compact';
       if (stagePrevMode === 'compact') compactBounds = win.getBounds();
       win.setAspectRatio(0);
@@ -801,7 +802,8 @@ function createWindow() {
       isFullMode = true;
       win.webContents.send('window-mode-changed', 'stage');
     } else {
-      const back = stagePrevMode || 'compact';
+      // never staged: stay in the current mode rather than forcing compact
+      const back = stagePrevMode || (isFullMode ? 'full' : 'compact');
       stagePrevMode = null;
       if (back === 'full') {
         win.setFullScreen(true);

@@ -35,6 +35,9 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
   liveTracksRef.current = tracks;
   // Shared between prefetch, next(), and onEnded so we play what we warmed
   const nextIdxRef = useRef(null);
+  // Index the crossfade deck actually loaded — set when a fade starts,
+  // read at promote so a mid-fade shuffle toggle can't mislabel the track
+  const armedNextIdxRef = useRef(null);
   const [trackIndex, setTrackIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
 
@@ -133,12 +136,19 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       setDuration(Number.isFinite(el.duration) ? el.duration : 0);
       setCurrentTime(el.currentTime || 0);
       setProgress(el.duration ? el.currentTime / el.duration : 0);
+      // Metadata can still be in flight on the promoted deck — without
+      // this duration stays 0 and gates like recordPlay's duration > 0
+      // never open (rebound listeners only fire on NEW loadedmetadata)
+      if (!Number.isFinite(el.duration)) {
+        el.addEventListener('loadedmetadata', () => setDuration(el.duration), { once: true });
+      }
       adapter.load(t)
         .then((res) => { if (!cancelled) setResolvedArt(res?.art ?? null); })
         .catch(() => { /* art is cosmetic */ });
-      return;
+      return () => { cancelled = true; };
     }
     engine.cancelCrossfade(); // manual index/queue change kills a pending fade
+    armedNextIdxRef.current = null;
 
     (async () => {
       try {
@@ -237,7 +247,8 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       const secs = automixSecsRef.current;
       const live = liveTracksRef.current;
       if (
-        secs > 0 && !engine.crossfading && !engine._next
+        secs > 0 && !engine.crossfading && !engine.nextArmed
+        && !audio.paused // scrubbing into the window while paused must not start a fade
         && Number.isFinite(audio.duration) && audio.duration > 0
         && audio.currentTime > 0.5
         && audio.duration - audio.currentTime <= secs
@@ -249,13 +260,20 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
         const nxt = nextIdxRef.current;
         const nextTrack = nxt != null ? live[nxt] : null;
         if (nextTrack) {
+          // Stream resolves can take seconds (yt-dlp) — re-validate that
+          // the arm still holds when the URL lands, or a stale fade fires
+          // on the wrong track / while paused
+          const armedIndex = trackIndexRef.current;
           adapterRef.current?.load?.(nextTrack)
             .then((res) => {
-              if (!res?.src || engine.crossfading) return;
+              if (!res?.src || engine.crossfading || engine.nextArmed) return;
+              if (trackIndexRef.current !== armedIndex || audio !== engine.audio || audio.paused) return;
               const remain = audio.duration - audio.currentTime;
-              if (remain <= 0) return;
+              if (remain <= 0 || remain > secs) return;
               const fade = Math.min(secs, remain);
-              if (engine.prepareNext(res.src)) engine.startCrossfade(fade);
+              if (engine.prepareNext(res.src) && engine.startCrossfade(fade)) {
+                armedNextIdxRef.current = nxt;
+              }
             })
             .catch(() => { /* no automix this time — normal advance still works */ });
         }
@@ -281,7 +299,9 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       // Automix handoff: the outgoing element ended mid-fade — promote
       // the incoming deck and advance the index without a reload.
       if (engine.crossfading) {
-        const nxt = nextIdxRef.current;
+        // Commit the index the deck actually loaded, not a recomputed next
+        const nxt = armedNextIdxRef.current ?? nextIdxRef.current;
+        armedNextIdxRef.current = null;
         engine.promoteNext();
         setAudioEl(engine.audio);
         if (nxt != null && nxt !== trackIndexRef.current) {
@@ -318,6 +338,9 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       // Media errors (bad src, decode failure, CORS reject) fire async after
       // src is set — without this the UI sat on "playing" at 0:00 forever.
       if (!audio.getAttribute('src')) return;
+      // a mid-fade primary error must not leave the incoming deck playing
+      // unsupervised (its 'ended' never reaches these listeners pre-promote)
+      engine.cancelCrossfade();
       setPlayError(audio.error?.message || 'track failed to load');
       setIsPlaying(false);
       audio.pause();

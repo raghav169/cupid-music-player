@@ -49,6 +49,13 @@ export default function StageView({
   const [hoverPct, setHoverPct] = useState(null);
   const volRef = useRef(null);
   const [volDragging, setVolDragging] = useState(false);
+  // Window drag listeners capture the render at drag-start — a crossfade
+  // promote mid-drag swaps the audio element, so route through refs that
+  // always hold the live handlers
+  const onSeekRef = useRef(onSeek);
+  onSeekRef.current = onSeek;
+  const onVolumeRef = useRef(onVolume);
+  onVolumeRef.current = onVolume;
 
   // The synced-lyric line under the needle (if the track has them)
   const lyricLine = useMemo(() => {
@@ -67,7 +74,7 @@ export default function StageView({
   const seekTo = (e) => {
     const rect = barRef.current.getBoundingClientRect();
     const p = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    onSeek(p);
+    onSeekRef.current(p);
     setHoverPct(p);
   };
 
@@ -88,7 +95,7 @@ export default function StageView({
   const setVol = (e) => {
     const rect = volRef.current.getBoundingClientRect();
     const v = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    onVolume(v);
+    onVolumeRef.current(v);
   };
 
   useEffect(() => {

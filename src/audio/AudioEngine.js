@@ -35,6 +35,7 @@ export class AudioEngine {
     this._next = null;
     this._nextSource = null;
     this._nextGain = null;
+    this._nextErrorHandler = null;
     this._crossfading = false;
   }
 
@@ -101,6 +102,9 @@ export class AudioEngine {
   }
 
   get crossfading() { return this._crossfading; }
+  // An incoming deck exists (prepared or mid-fade) — usePlayer reads this
+  // instead of touching the private field
+  get nextArmed() { return this._next != null; }
 
   // Preload the next track on a second deck, silent until startCrossfade.
   // Returns false without Web Audio (automix needs gain nodes).
@@ -119,6 +123,10 @@ export class AudioEngine {
       this._next = el;
       this._nextSource = src;
       this._nextGain = g;
+      // A dead incoming deck must not sit silent then get promoted — drop
+      // it and restore the primary's gain so normal advance still works
+      this._nextErrorHandler = () => this.cancelCrossfade();
+      el.addEventListener('error', this._nextErrorHandler, { once: true });
       return true;
     } catch {
       this._next = this._nextSource = this._nextGain = null;
@@ -133,7 +141,10 @@ export class AudioEngine {
     if (!this._ctx || !this._next || this._crossfading) return false;
     const t = this._ctx.currentTime;
     this._next.volume = this.audio.volume; // match the user's level
-    this._next.play().catch(() => {});
+    this._next.play().catch(() => {
+      // can't play the incoming deck — abandon the fade, keep primary
+      this.cancelCrossfade();
+    });
     const g = Math.max(0.2, secs);
     this._nextGain.gain.setValueAtTime(0, t);
     this._nextGain.gain.linearRampToValueAtTime(1, t + g);
@@ -150,6 +161,13 @@ export class AudioEngine {
     const old = this.audio;
     try { old.pause(); old.removeAttribute('src'); old.load(); } catch { /* teardown best-effort */ }
     try { this._source.disconnect(); this._fade.disconnect(); } catch { /* already torn */ }
+    if (this._nextErrorHandler) {
+      this._next.removeEventListener('error', this._nextErrorHandler);
+      this._nextErrorHandler = null;
+    }
+    // Carry the user's volume across — mid-fade volume changes only
+    // reached the outgoing element
+    this._next.volume = old.volume;
     this.audio = this._next;
     this._source = this._nextSource;
     this._fade = this._nextGain;
@@ -161,6 +179,10 @@ export class AudioEngine {
   // Unwind back to primary-only playback (pause/seek/manual next mid-fade).
   cancelCrossfade() {
     if (this._next) {
+      if (this._nextErrorHandler) {
+        this._next.removeEventListener('error', this._nextErrorHandler);
+        this._nextErrorHandler = null;
+      }
       try { this._next.pause(); this._next.removeAttribute('src'); this._next.load(); } catch { /* noop */ }
       try { this._nextSource.disconnect(); this._nextGain.disconnect(); } catch { /* noop */ }
       this._next = this._nextSource = this._nextGain = null;
