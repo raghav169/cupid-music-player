@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('cupid', {
   close: () => ipcRenderer.send('window-close'),
   resize: (data) => ipcRenderer.send('window-resize', data),
   toggleMode: () => ipcRenderer.send('window-toggle-mode'),
+  setStageMode: (on) => ipcRenderer.send('window-set-stage', !!on),
   onModeChange: (cb) => {
     const listener = (_e, mode) => cb(mode);
     ipcRenderer.on('window-mode-changed', listener);

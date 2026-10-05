@@ -121,6 +121,8 @@ export default function SettingsPanel({
   customHue, onCustomHue,
   queue,
   discord,
+  automix,
+  stage,
   eqGains, onEqChange,
   sleepMins, onSleepChange,
   musicService, onMusicService,
@@ -197,6 +199,41 @@ export default function SettingsPanel({
             >
               rich presence: {discord.enabled ? 'on' : 'off'}
             </button>
+          </>
+        )}
+
+        {stage && (
+          <>
+            <div className="settings-label">view</div>
+            <button className="settings-theme-btn" onClick={stage.onEnter}>
+              stage mode ⛶
+            </button>
+          </>
+        )}
+
+        {automix && (
+          <>
+            <div className="settings-label">automix</div>
+            <button
+              className={`settings-theme-btn ${automix.secs > 0 ? 'active' : ''}`}
+              onClick={() => automix.onChange(automix.secs > 0 ? 0 : 6)}
+            >
+              crossfade: {automix.secs > 0 ? 'on' : 'off'}
+            </button>
+            {automix.secs > 0 && (
+              <div className="hue-picker">
+                <input
+                  type="range"
+                  className="hue-slider"
+                  min="1"
+                  max="12"
+                  value={automix.secs}
+                  onChange={(e) => automix.onChange(Number(e.target.value))}
+                  aria-label="automix crossfade seconds"
+                />
+                <span className="settings-label">fade {automix.secs}s</span>
+              </div>
+            )}
           </>
         )}
 
@@ -416,7 +453,7 @@ export default function SettingsPanel({
 
         <div className="settings-label">keys</div>
         <div className="side-hint">
-          space play · ←/→ seek · ↑/↓ volume · n/p next/prev · m mute · t theme
+          space play · ←/→ seek · ↑/↓ volume · n/p next/prev · m mute · t theme · f stage · esc back
         </div>
 
         {error && <div className="settings-error">{error}</div>}

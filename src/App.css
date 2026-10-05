@@ -1029,3 +1029,301 @@
   background: var(--color-panel-text);
   border: 2px solid var(--color-primary);
 }
+
+/* ── Stage mode — the pretty fullscreen player ─────────── */
+.mode-stage {
+  background: #0c0810;
+}
+
+.stage {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 50% 0%, color-mix(in srgb, var(--color-secondary) 38%, var(--color-primary)) 0%, var(--color-primary) 62%),
+    var(--color-primary);
+}
+
+.stage-hearts {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.stage-heart {
+  position: absolute;
+  color: var(--color-secondary);
+  opacity: 0;
+  text-shadow: 0 0 10px rgba(255, 255, 255, 0.25);
+  animation-name: stage-heart-float;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+
+@keyframes stage-heart-float {
+  0%   { opacity: 0; transform: translateY(24px) scale(0.8); }
+  25%  { opacity: 0.55; }
+  55%  { opacity: 0.35; }
+  100% { opacity: 0; transform: translateY(-48px) scale(1.15) rotate(12deg); }
+}
+
+.stage-winbar {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  display: flex;
+  gap: 8px;
+  z-index: 5;
+  -webkit-app-region: no-drag;
+}
+
+.stage-center {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  z-index: 2;
+  padding-bottom: 4vh;
+  max-width: min(90vw, 720px);
+}
+
+/* vinyl behind the art card — spins while playing */
+.stage-disc-wrap {
+  position: relative;
+  width: min(34vmin, 300px);
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stage-disc {
+  position: absolute;
+  width: 108%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 50%, var(--color-secondary) 0 12%, #1a1516 12% 14%, transparent 14%),
+    repeating-radial-gradient(circle at 50% 50%, #141010 0 3px, #221a1a 3px 6px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), inset 0 0 0 2px rgba(255, 255, 255, 0.06);
+  animation: stage-spin 4s linear infinite;
+  animation-play-state: paused;
+}
+
+.stage-disc-wrap.spinning .stage-disc {
+  animation-play-state: running;
+}
+
+@keyframes stage-spin {
+  to { transform: rotate(360deg); }
+}
+
+.stage-art-card {
+  position: relative;
+  width: 72%;
+  aspect-ratio: 1;
+  border: 4px solid var(--color-secondary);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--color-primary);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 0 0 6px rgba(0, 0, 0, 0.18);
+  animation: stage-bob 6s ease-in-out infinite;
+}
+
+@keyframes stage-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+.stage-art-card img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  image-rendering: pixelated;
+  display: block;
+}
+
+.stage-art-empty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 64px;
+  color: var(--color-secondary);
+}
+
+.stage-info {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.stage-title {
+  font-family: 'Rainyhearts', monospace;
+  font-size: clamp(26px, 4.2vmin, 40px);
+  color: var(--color-title);
+  text-shadow: 0 2px 0 rgba(255, 255, 255, 0.14), 0 0 24px rgba(255, 255, 255, 0.15);
+  max-width: 80vw;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage-artist {
+  font-family: 'Rainyhearts', monospace;
+  font-size: clamp(14px, 2vmin, 20px);
+  color: var(--color-secondary);
+}
+
+.stage-lyric {
+  font-family: 'Rainyhearts', monospace;
+  font-size: clamp(12px, 1.7vmin, 17px);
+  color: var(--color-panel-text);
+  opacity: 0.85;
+  min-height: 1.3em;
+  max-width: 70vw;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* chunky pixel-styled buttons */
+.stage-btn {
+  font-family: 'Segoe UI Symbol', 'Rainyhearts', monospace;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--color-panel-text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 3px solid var(--color-secondary);
+  border-radius: 10px;
+  padding: 10px 18px;
+  cursor: pointer;
+  box-shadow: 0 4px 0 rgba(0, 0, 0, 0.35);
+  transition: transform 0.08s ease, background 0.12s ease;
+}
+
+.stage-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  transform: translateY(-2px);
+}
+
+.stage-btn:active {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
+}
+
+.stage-play {
+  font-size: 30px;
+  padding: 14px 26px;
+  border-radius: 12px;
+}
+
+.stage-mini {
+  font-size: 16px;
+  padding: 6px 12px;
+}
+
+.stage-mini.on {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.stage-win {
+  font-size: 15px;
+  padding: 6px 11px;
+  border-width: 2px;
+  border-radius: 8px;
+}
+
+.stage-transport {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.stage-subrow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.stage-volbar {
+  width: 110px;
+  height: 12px;
+  border-radius: 6px;
+  border: 2px solid var(--color-secondary);
+  background: rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.stage-volfill {
+  height: 100%;
+  background: var(--color-panel-text);
+}
+
+/* progress */
+.stage-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: min(72vw, 560px);
+}
+
+.stage-time {
+  font-family: 'Rainyhearts', monospace;
+  font-size: 13px;
+  color: var(--color-panel-text);
+  min-width: 38px;
+  text-align: center;
+}
+
+.stage-progress {
+  position: relative;
+  flex: 1;
+  height: 16px;
+  border-radius: 8px;
+  border: 3px solid var(--color-secondary);
+  background: rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+}
+
+.stage-progress-fill {
+  height: 100%;
+  border-radius: 5px;
+  background: linear-gradient(90deg, var(--color-secondary), var(--color-panel-text));
+}
+
+.stage-progress-star {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 18px;
+  color: var(--color-panel-text);
+  text-shadow: 0 0 8px rgba(255, 255, 255, 0.6);
+  pointer-events: none;
+}
+
+/* visualizer — inline strip instead of the absolute pixel-frame spot */
+.stage .viz-canvas {
+  position: static;
+  width: 260px;
+  height: 22px;
+}
+
+.stage-hint {
+  position: absolute;
+  bottom: 12px;
+  left: 16px;
+  font-family: 'Rainyhearts', monospace;
+  font-size: 12px;
+  color: var(--color-panel-text);
+  opacity: 0.55;
+}

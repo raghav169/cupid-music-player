@@ -787,6 +787,37 @@ function createWindow() {
     win.webContents.send('window-mode-changed', isFullMode ? 'full' : 'compact');
   };
 
+  // 'stage' — the pretty fullscreen player. Same OS fullscreen as 'full'
+  // mode but a different renderer layout; remembers which of the two it
+  // came from so Esc returns there.
+  let stagePrevMode = null;
+  const onSetStage = (_e, on) => {
+    if (win.isDestroyed()) return;
+    if (on) {
+      if (stagePrevMode !== null) return; // already staged (key repeat / double-press)
+      stagePrevMode = isFullMode ? 'full' : 'compact';
+      if (stagePrevMode === 'compact') compactBounds = win.getBounds();
+      win.setAspectRatio(0);
+      win.setFullScreen(true);
+      isFullMode = true;
+      win.webContents.send('window-mode-changed', 'stage');
+    } else {
+      // never staged: stay in the current mode rather than forcing compact
+      const back = stagePrevMode || (isFullMode ? 'full' : 'compact');
+      stagePrevMode = null;
+      if (back === 'full') {
+        win.setFullScreen(true);
+        win.webContents.send('window-mode-changed', 'full');
+      } else {
+        win.setFullScreen(false);
+        win.setAspectRatio(ASPECT);
+        if (compactBounds) win.setBounds(compactBounds);
+        isFullMode = false;
+        win.webContents.send('window-mode-changed', 'compact');
+      }
+    }
+  };
+
   const onMinimize = () => win.minimize();
   const onMaximize = () => {
     if (preMaxBounds) {
@@ -905,6 +936,7 @@ function createWindow() {
   ipcMain.on('window-close', onClose);
   ipcMain.on('window-resize', onResize);
   ipcMain.on('window-toggle-mode', onToggleMode);
+  ipcMain.on('window-set-stage', onSetStage);
   ipcMain.on('open-external', onOpenExternal);
   ipcMain.on('set-theme', onSetTheme);
 
@@ -915,6 +947,7 @@ function createWindow() {
     ipcMain.removeListener('window-close', onClose);
     ipcMain.removeListener('window-resize', onResize);
     ipcMain.removeListener('window-toggle-mode', onToggleMode);
+    ipcMain.removeListener('window-set-stage', onSetStage);
     ipcMain.removeListener('open-external', onOpenExternal);
     ipcMain.removeListener('set-theme', onSetTheme);
   });
