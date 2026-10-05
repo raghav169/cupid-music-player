@@ -11,16 +11,28 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { AudioEngine } from './audio/AudioEngine.js';
 
-export default function usePlayer(tracks, playMode = 'normal', adapter, startAtRef) {
+export default function usePlayer(tracks, playMode = 'normal', adapter, startAtRef, automixSecs = 0) {
   const engineRef = useRef(null);
   if (!engineRef.current) engineRef.current = new AudioEngine();
   const engine = engineRef.current;
-  const audio = engine.audio;
+  // engine.audio swaps during a crossfade promote — track it in state so
+  // renders/listeners always bind the live element, not a stale capture
+  const [audioEl, setAudioEl] = useState(engine.audio);
+  const audio = audioEl;
 
   const playModeRef = useRef(playMode);
   playModeRef.current = playMode;
   const adapterRef = useRef(adapter);
   adapterRef.current = adapter;
+  const automixSecsRef = useRef(automixSecs);
+  automixSecsRef.current = automixSecs;
+  // Set by the crossfade promote path: the next index change must NOT
+  // reload the element (the new deck is already playing it)
+  const promotedRef = useRef(false);
+  // Listeners (onTimeUpdate automix arming) need the live track list even
+  // when tracks changes without a length change
+  const liveTracksRef = useRef(tracks);
+  liveTracksRef.current = tracks;
   // Shared between prefetch, next(), and onEnded so we play what we warmed
   const nextIdxRef = useRef(null);
   const [trackIndex, setTrackIndex] = useState(0);
@@ -109,6 +121,24 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     setProgress(0);
     setCurrentTime(0);
     setDuration(0);
+
+    if (promotedRef.current) {
+      // Crossfade promote: the new element is already mid-song — only
+      // resolve art/metadata, never touch src or playback.
+      promotedRef.current = false;
+      setLoading(false);
+      setPlayError(null);
+      // Reflect where the new deck actually is — it started at fade-start
+      const el = engine.audio;
+      setDuration(Number.isFinite(el.duration) ? el.duration : 0);
+      setCurrentTime(el.currentTime || 0);
+      setProgress(el.duration ? el.currentTime / el.duration : 0);
+      adapter.load(t)
+        .then((res) => { if (!cancelled) setResolvedArt(res?.art ?? null); })
+        .catch(() => { /* art is cosmetic */ });
+      return;
+    }
+    engine.cancelCrossfade(); // manual index/queue change kills a pending fade
 
     (async () => {
       try {
@@ -200,6 +230,36 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
         setProgress(audio.currentTime / audio.duration);
       }
       pushPositionState();
+
+      // Automix: when inside the fade window, load the next track onto the
+      // second deck and overlap-fade into it. The old element's 'ended'
+      // (below) performs the actual handoff.
+      const secs = automixSecsRef.current;
+      const live = liveTracksRef.current;
+      if (
+        secs > 0 && !engine.crossfading && !engine._next
+        && Number.isFinite(audio.duration) && audio.duration > 0
+        && audio.currentTime > 0.5
+        && audio.duration - audio.currentTime <= secs
+        && live.length > 0
+        // 'repeat' replays the current track — a fade to a different one
+        // would violate that; single-track repeat fades into itself fine
+        && !(playModeRef.current === 'repeat' && live.length > 1)
+      ) {
+        const nxt = nextIdxRef.current;
+        const nextTrack = nxt != null ? live[nxt] : null;
+        if (nextTrack) {
+          adapterRef.current?.load?.(nextTrack)
+            .then((res) => {
+              if (!res?.src || engine.crossfading) return;
+              const remain = audio.duration - audio.currentTime;
+              if (remain <= 0) return;
+              const fade = Math.min(secs, remain);
+              if (engine.prepareNext(res.src)) engine.startCrossfade(fade);
+            })
+            .catch(() => { /* no automix this time — normal advance still works */ });
+        }
+      }
     };
 
     const onLoadedMetadata = () => {
@@ -218,6 +278,20 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
     };
 
     const onEnded = () => {
+      // Automix handoff: the outgoing element ended mid-fade — promote
+      // the incoming deck and advance the index without a reload.
+      if (engine.crossfading) {
+        const nxt = nextIdxRef.current;
+        engine.promoteNext();
+        setAudioEl(engine.audio);
+        if (nxt != null && nxt !== trackIndexRef.current) {
+          promotedRef.current = true;
+          setTrackIndex(nxt);
+        } else {
+          setIsPlaying(true); // same index — the new element just keeps going
+        }
+        return;
+      }
       // Single-track queues wrap to themselves — restarting is the
       // only way to keep playing (setTrackIndex to the same index
       // wouldn't reload the element)
@@ -260,12 +334,13 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
       audio.removeEventListener('ended', onEnded);
       audio.removeEventListener('error', onError);
     };
-  }, [tracks.length]);
+  }, [tracks.length, audioEl]);
 
   // ── Playback controls ────────────────────────────────────
 
   const togglePlay = useCallback(() => {
     if (isPlaying) {
+      engine.cancelCrossfade(); // pausing mid-fade snaps back to the primary
       engine.pause();
       setIsPlaying(false);
     } else if (tracks[trackIndex]) {
@@ -276,6 +351,7 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
 
   const next = useCallback(() => {
     if (tracks.length === 0) return;
+    engine.cancelCrossfade();
     if (tracks.length === 1) {
       // The queue wraps to itself — restart the track
       audio.currentTime = 0;
@@ -301,6 +377,7 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
 
   const prev = useCallback(() => {
     if (tracks.length === 0) return;
+    engine.cancelCrossfade();
     if (audio.currentTime > 3 || tracks.length === 1) {
       audio.currentTime = 0;
       // Play explicitly — the track-index effect can't fire when the
@@ -315,9 +392,10 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
 
   const seek = useCallback((fraction) => {
     if (audio.duration) {
+      engine.cancelCrossfade(); // user scrubbed — stop any in-flight fade
       audio.currentTime = Math.min(fraction, 1) * audio.duration;
     }
-  }, [audio]);
+  }, [audio, engine]);
 
   const setVolume = useCallback((v) => {
     const clamped = Math.max(0, Math.min(1, v));

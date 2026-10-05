@@ -8,6 +8,7 @@ import SettingsPanel from './SettingsPanel.jsx';
 import LibraryPanel from './LibraryPanel.jsx';
 import SearchPanel from './SearchPanel.jsx';
 import LyricsPanel from './LyricsPanel.jsx';
+import StageView from './StageView.jsx';
 import { parseLrc } from './lrc.js';
 import usePlaylists from './usePlaylists.js';
 import useStats from './useStats.js';
@@ -150,7 +151,23 @@ export default function App() {
   const isStreaming = source === 'streaming';
   const activeTracks = queue ?? (isStreaming ? streamTracks : localTracks);
   const activeAdapter = queue ? mixedAdapter : (isStreaming ? streamAdapter : localAdapter);
-  const player = usePlayer(activeTracks, playMode, activeAdapter, startAtRef);
+  // Automix — overlap-fade into the next track; 0 = off. Persisted so a
+  // DJ session survives restarts like the theme does.
+  const [automixSecs, setAutomixSecsState] = useState(() => {
+    try {
+      const v = parseInt(localStorage.getItem('cupid-automix-secs'), 10);
+      return Number.isFinite(v) ? Math.max(0, Math.min(12, v)) : 0;
+    } catch {
+      return 0;
+    }
+  });
+  const setAutomixSecs = useCallback((v) => {
+    const c = Math.max(0, Math.min(12, Math.round(v)));
+    setAutomixSecsState(c);
+    try { localStorage.setItem('cupid-automix-secs', String(c)); } catch { /* ignore */ }
+  }, []);
+
+  const player = usePlayer(activeTracks, playMode, activeAdapter, startAtRef, automixSecs);
   const { theme, setTheme, toggleTheme, assets, customHue, setCustomHue } = useTheme();
 
   // Play a track list (playlist/search result), starting at `index`.
@@ -235,6 +252,13 @@ export default function App() {
 
   // ── Listen Together (LAN room) ────────────────────────────
   const [roomJoinInput, setRoomJoinInput] = useState('');
+
+  // ?mode=full forces full layout — handy for browser preview/QA.
+  // 'stage' (the pretty fullscreen) joins via window-mode-changed events.
+  // Declared here — transportRef below captures it every render.
+  const [winMode, setWinMode] = useState(() =>
+    new URLSearchParams(window.location.search).get('mode') === 'full' ? 'full' : 'compact'
+  ); // 'compact' | 'full' | 'stage'
   // Read the audio element directly for position — the React currentTime
   // state only updates on timeupdate (~4Hz), which would systematically
   // under-report the host position to room guests by up to ~250ms
@@ -293,6 +317,8 @@ export default function App() {
     // Seek math reads the live audio element — the ~4Hz currentTime state
     // under-reports position by up to ~250ms on fast key repeats.
     getNow: () => playerRef.current.engine?.audio?.currentTime ?? playerRef.current.currentTime ?? 0,
+    winMode,
+    toggleStage: () => window.cupid?.setStageMode?.(winMode !== 'stage'),
   };
   useEffect(() => {
     return window.cupid?.onMediaCommand?.((op) => {
@@ -336,7 +362,10 @@ export default function App() {
       const SEEK_STEP = 5;
       const VOL_STEP = 0.05;
       const mod = e.ctrlKey || e.metaKey;
-      if ((mod) && e.key === 'ArrowRight') {
+      if (e.key === 'Escape' && t.winMode === 'stage') {
+        e.preventDefault();
+        t.toggleStage();
+      } else if ((mod) && e.key === 'ArrowRight') {
         e.preventDefault();
         t.doNext(); // Ctrl/Cmd+→ = next track (checked before the plain seek)
       } else if ((mod) && e.key === 'ArrowLeft') {
@@ -365,6 +394,8 @@ export default function App() {
         t.toggleMute();
       } else if (e.key.toLowerCase() === 't' && !mod && !e.altKey) {
         t.toggleTheme();
+      } else if (e.key.toLowerCase() === 'f' && !mod && !e.altKey) {
+        t.toggleStage();
       }
     };
     window.addEventListener('keydown', onKey);
@@ -607,10 +638,6 @@ export default function App() {
     }
   }, [room.role, loadLocalPlaylist, playTrackList, showToast]);
 
-  // ?mode=full forces full layout — handy for browser preview/QA
-  const [winMode, setWinMode] = useState(() =>
-    new URLSearchParams(window.location.search).get('mode') === 'full' ? 'full' : 'compact'
-  ); // 'compact' | 'full'
   useEffect(() => window.cupid?.onModeChange?.(setWinMode), []);
 
   const [recordFrame, setRecordFrame] = useState(0);
@@ -754,7 +781,7 @@ export default function App() {
 
   return (
     <div
-      className={`app-shell theme-${theme} ${winMode === 'full' ? 'mode-full' : ''}`}
+      className={`app-shell theme-${theme} ${winMode === 'full' ? 'mode-full' : ''} ${winMode === 'stage' ? 'mode-stage' : ''}`}
       style={customVars}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
@@ -766,6 +793,31 @@ export default function App() {
       </div>
     )}
     {toast && <div className="cupid-toast">{toast}</div>}
+    {winMode === 'stage' && (
+      <StageView
+        track={track}
+        isPlaying={isPlaying}
+        progress={progress}
+        duration={duration}
+        currentTime={currentTime}
+        onTogglePlay={doTogglePlay}
+        onNext={doNext}
+        onPrev={doPrev}
+        onSeek={doSeek}
+        volume={volume}
+        onVolume={setVolume}
+        muted={muted}
+        onMute={toggleMute}
+        playMode={playMode}
+        onCyclePlayMode={cyclePlayMode}
+        engine={player.engine}
+        theme={theme}
+        lyrics={lyrics}
+        onExitStage={() => window.cupid?.setStageMode?.(false)}
+      />
+    )}
+    {winMode !== 'stage' && (
+    <>
     {winMode === 'full' && (
       <LibraryPanel
         playlists={playlists}
@@ -1023,6 +1075,8 @@ export default function App() {
             guest: room.role === 'guest',
           }}
           discord={{ available: discordAvail, enabled: discordOn, onToggle: setDiscordOn }}
+          automix={{ secs: automixSecs, onChange: setAutomixSecs }}
+          stage={{ onEnter: () => window.cupid?.setStageMode?.(true) }}
           eqGains={eqGains}
           onEqChange={setEqGains}
           sleepMins={sleepMins}
@@ -1134,6 +1188,8 @@ export default function App() {
           title={track?.title}
         />
       </div>
+    )}
+    </>
     )}
     </div>
   );
