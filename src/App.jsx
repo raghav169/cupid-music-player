@@ -151,6 +151,7 @@ export default function App() {
   const activeTracks = queue ?? (isStreaming ? streamTracks : localTracks);
   const activeAdapter = queue ? mixedAdapter : (isStreaming ? streamAdapter : localAdapter);
   const player = usePlayer(activeTracks, playMode, activeAdapter, startAtRef);
+  const { theme, setTheme, toggleTheme, assets, customHue, setCustomHue } = useTheme();
 
   // Play a track list (playlist/search result), starting at `index`.
   // opts: { seekTo (s), playing (bool) } — room guests join mid-song
@@ -164,6 +165,7 @@ export default function App() {
 
   const {
     track,
+    trackIndex,
     isPlaying,
     progress,
     duration,
@@ -261,19 +263,37 @@ export default function App() {
   }, [room.role, room.command, playTrackList]);
   const playTrackUi = useCallback((t) => playTrackListUi([t], 0), [playTrackListUi]);
 
+  // Remove a track from the active queue (materializes library/streaming
+  // lists into a session queue). Keeps the current song playing unless it
+  // was the one removed — then the next track slides in.
+  const removeFromQueue = useCallback((i) => {
+    if (room.role === 'guest') return;
+    if (i < 0 || i >= activeTracks.length) return;
+    const remaining = activeTracks.filter((_, idx) => idx !== i);
+    startAtRef.current = i === trackIndex
+      ? { index: Math.max(0, Math.min(i, remaining.length - 1)), autoPlay: isPlaying }
+      : { index: i < trackIndex ? trackIndex - 1 : trackIndex, seekTo: currentTime, playing: isPlaying };
+    setQueue(remaining);
+  }, [room.role, activeTracks, trackIndex, isPlaying, currentTime]);
+
   // ── OS integration: taskbar/tray state + transport commands back ──
   // Pushes {isPlaying, title, progress} to main → taskbar thumbnail buttons,
   // taskbar progress bar, tray tooltip.
   useEffect(() => {
-    window.cupid?.setPlaybackState?.({ isPlaying, title: track?.title, progress });
-  }, [isPlaying, track?.title, progress]);
+    window.cupid?.setPlaybackState?.({ isPlaying, title: track?.title, artist: track?.artist, progress });
+  }, [isPlaying, track?.title, track?.artist, progress]);
 
   // Taskbar buttons / tray menu / OS media keys arrive as 'media-command';
   // OS media keys (SMTC/MediaSession) go through the same routing. The ref
   // keeps both subscriptions stable while room-mode transport (guest →
   // forward to host) stays live.
-  const transportRef = useRef({ doTogglePlay, doNext, doPrev, doSeek, duration, isPlaying });
-  transportRef.current = { doTogglePlay, doNext, doPrev, doSeek, duration, isPlaying };
+  const transportRef = useRef({ doTogglePlay, doNext, doPrev, doSeek, duration, isPlaying, currentTime, volume, setVolume, toggleMute, toggleTheme });
+  transportRef.current = {
+    doTogglePlay, doNext, doPrev, doSeek, duration, isPlaying, currentTime, volume, setVolume, toggleMute, toggleTheme,
+    // Seek math reads the live audio element — the ~4Hz currentTime state
+    // under-reports position by up to ~250ms on fast key repeats.
+    getNow: () => playerRef.current.engine?.audio?.currentTime ?? playerRef.current.currentTime ?? 0,
+  };
   useEffect(() => {
     return window.cupid?.onMediaCommand?.((op) => {
       const t = transportRef.current;
@@ -304,6 +324,51 @@ export default function App() {
         try { ms.setActionHandler(a, null); } catch {}
       }
     };
+  }, []);
+
+  // Keyboard shortcuts — the pixel buttons have no focus ring, so keys are
+  // the accessible path. Skips when typing in a field. Same room-aware
+  // transport routing as the OS media keys.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.target?.closest?.('input, textarea, select, [contenteditable]')) return;
+      const t = transportRef.current;
+      const SEEK_STEP = 5;
+      const VOL_STEP = 0.05;
+      const mod = e.ctrlKey || e.metaKey;
+      if ((mod) && e.key === 'ArrowRight') {
+        e.preventDefault();
+        t.doNext(); // Ctrl/Cmd+→ = next track (checked before the plain seek)
+      } else if ((mod) && e.key === 'ArrowLeft') {
+        e.preventDefault();
+        t.doPrev();
+      } else if (e.key === ' ' && !mod && !e.altKey) {
+        e.preventDefault();
+        t.doTogglePlay();
+      } else if (e.key === 'ArrowRight' && !mod && !e.altKey && t.duration > 0) {
+        e.preventDefault();
+        t.doSeek(Math.min(1, (t.getNow() + SEEK_STEP) / t.duration));
+      } else if (e.key === 'ArrowLeft' && !mod && !e.altKey && t.duration > 0) {
+        e.preventDefault();
+        t.doSeek(Math.max(0, (t.getNow() - SEEK_STEP) / t.duration));
+      } else if (e.key === 'ArrowUp' && !mod) {
+        e.preventDefault();
+        t.setVolume(t.volume + VOL_STEP);
+      } else if (e.key === 'ArrowDown' && !mod) {
+        e.preventDefault();
+        t.setVolume(t.volume - VOL_STEP);
+      } else if (e.key.toLowerCase() === 'n' && !mod && !e.altKey) {
+        t.doNext();
+      } else if (e.key.toLowerCase() === 'p' && !mod && !e.altKey) {
+        t.doPrev();
+      } else if (e.key.toLowerCase() === 'm' && !mod && !e.altKey) {
+        t.toggleMute();
+      } else if (e.key.toLowerCase() === 't' && !mod && !e.altKey) {
+        t.toggleTheme();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
 
   // Track-change toast when the window isn't focused (Windows action center)
@@ -477,7 +542,70 @@ export default function App() {
     }
   }, []);
 
-  const { theme, setTheme, assets } = useTheme();
+  // ── Discord Rich Presence (opt-in; needs CUPID_DISCORD_CLIENT_ID) ──
+  const [discordOn, setDiscordOn] = useState(() => {
+    try { return localStorage.getItem('cupid-discord-rpc') === '1'; } catch { return false; }
+  });
+  const [discordAvail, setDiscordAvail] = useState(false);
+  useEffect(() => {
+    window.cupid?.discordAvailable?.().then(setDiscordAvail).catch(() => {});
+  }, []);
+  useEffect(() => {
+    window.cupid?.setDiscordEnabled?.(discordOn);
+    try { localStorage.setItem('cupid-discord-rpc', discordOn ? '1' : '0'); } catch { /* ignore */ }
+  }, [discordOn]);
+
+  // ── Drag-drop audio import ─────────────────────────────
+  const [dropActive, setDropActive] = useState(false);
+  const [toast, setToast] = useState(null);
+  const toastTimerRef = useRef(null);
+  const showToast = useCallback((msg) => {
+    setToast(msg);
+    clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(null), 3500);
+  }, []);
+
+  const onDragOver = useCallback((e) => {
+    e.preventDefault();
+    // Only flatter the user when the payload actually contains files —
+    // drags of links/text shouldn't light the drop overlay
+    if (e.dataTransfer?.types?.includes('Files')) setDropActive(true);
+  }, []);
+  const onDragLeave = useCallback((e) => {
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    setDropActive(false);
+  }, []);
+  const onDrop = useCallback(async (e) => {
+    e.preventDefault();
+    setDropActive(false);
+    // Guests can't touch their own library — the import + autoplay would
+    // fork them off the host's queue
+    if (room.role === 'guest') { showToast('the host controls the tunes here'); return; }
+    const files = [...(e.dataTransfer?.files || [])];
+    const paths = files.map((f) => {
+      try { return window.cupid?.getPathForFile?.(f) || null; } catch { return null; }
+    }).filter(Boolean);
+    if (!paths.length || !window.cupid?.importAudioFiles) return;
+    try {
+      const res = await window.cupid.importAudioFiles(paths);
+      const n = res?.added?.length ?? 0;
+      const skipped = (res?.skipped?.length ?? 0) + (files.length - paths.length);
+      if (!n) {
+        showToast(skipped ? 'no audio files in that drop :(' : 'nothing to add');
+        return;
+      }
+      await loadLocalPlaylist();
+      setQueue(null);
+      setSource('local');
+      setMusicService('local');
+      try { localStorage.setItem('cupid-player-music-service', 'local'); } catch { /* ignore */ }
+      // Tracks play straight away — the fun of dropping something in
+      playTrackList(res.added, 0);
+      showToast(`added ${n} song${n === 1 ? '' : 's'} ♥${skipped ? ` (${skipped} skipped)` : ''}`);
+    } catch (err) {
+      showToast(`import failed: ${err.message}`);
+    }
+  }, [room.role, loadLocalPlaylist, playTrackList, showToast]);
 
   // ?mode=full forces full layout — handy for browser preview/QA
   const [winMode, setWinMode] = useState(() =>
@@ -614,8 +742,30 @@ export default function App() {
     },
   });
 
+  // 'custom' theme — pink pixel art rotated to a user hue; text colors
+  // derived from the same hue so panels stay readable
+  const customVars = theme === 'custom' ? {
+    '--custom-hue': `${customHue}deg`,
+    '--color-title': `hsl(${customHue}, 40%, 28%)`,
+    '--color-primary': `hsl(${customHue}, 45%, 30%)`,
+    '--color-secondary': `hsl(${customHue}, 38%, 52%)`,
+    '--color-panel-text': `hsl(${customHue}, 65%, 88%)`,
+  } : undefined;
+
   return (
-    <div className={`app-shell theme-${theme} ${winMode === 'full' ? 'mode-full' : ''}`}>
+    <div
+      className={`app-shell theme-${theme} ${winMode === 'full' ? 'mode-full' : ''}`}
+      style={customVars}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+    {dropActive && (
+      <div className="drop-overlay">
+        <div className="drop-overlay-inner">drop to add ♥</div>
+      </div>
+    )}
+    {toast && <div className="cupid-toast">{toast}</div>}
     {winMode === 'full' && (
       <LibraryPanel
         playlists={playlists}
@@ -863,6 +1013,16 @@ export default function App() {
         <SettingsPanel
           theme={theme}
           onTheme={setTheme}
+          customHue={customHue}
+          onCustomHue={setCustomHue}
+          queue={{
+            tracks: activeTracks,
+            index: trackIndex,
+            onJump: (i) => playTrackListUi(activeTracks, i),
+            onRemove: removeFromQueue,
+            guest: room.role === 'guest',
+          }}
+          discord={{ available: discordAvail, enabled: discordOn, onToggle: setDiscordOn }}
           eqGains={eqGains}
           onEqChange={setEqGains}
           sleepMins={sleepMins}

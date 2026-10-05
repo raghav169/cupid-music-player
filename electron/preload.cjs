@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('cupid', {
   version: process.versions.electron,
@@ -48,6 +48,13 @@ contextBridge.exposeInMainWorld('cupid', {
   },
   getLocalAudioPath: (filename) => ipcRenderer.invoke('get-local-audio-path', filename),
   openMusicFolder: () => ipcRenderer.invoke('open-music-folder'),
+  // Drag-drop import — File.path is gone in modern Electron; the path is
+  // only obtainable in the preload context via webUtils.
+  getPathForFile: (file) => webUtils.getPathForFile(file),
+  importAudioFiles: (paths) => ipcRenderer.invoke('import-audio-files', paths),
+  // Discord Rich Presence — needs CUPID_DISCORD_CLIENT_ID in the env
+  discordAvailable: () => ipcRenderer.invoke('discord-available'),
+  setDiscordEnabled: (enabled) => ipcRenderer.send('set-discord-rpc', enabled),
   youtubeFetchPlaylist: (url) => ipcRenderer.invoke('youtube-fetch-playlist', url),
   youtubeOauthStart: (opts) => ipcRenderer.invoke('youtube-oauth-start', opts),
   youtubeOauthCancel: () => ipcRenderer.invoke('youtube-oauth-cancel'),

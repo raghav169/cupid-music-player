@@ -133,9 +133,20 @@ const THEME_ASSETS = {
 };
 
 const STORAGE_KEY = 'cupid-player-theme';
-// mint/lavender reuse pink assets — their hue shift lives in App.css
-// (.theme-mint/.theme-lavender apply a hue-rotate filter to .layer)
-export const THEMES = ['pink', 'blue', 'mint', 'lavender'];
+const HUE_KEY = 'cupid-player-custom-hue';
+// mint/lavender/custom reuse pink assets — their hue shift lives in App.css
+// (.theme-*/.theme-custom apply a hue-rotate filter to .layer)
+export const THEMES = ['pink', 'blue', 'mint', 'lavender', 'custom'];
+
+function getStoredHue() {
+  try {
+    const h = parseInt(localStorage.getItem(HUE_KEY), 10);
+    if (Number.isFinite(h)) return Math.max(0, Math.min(359, h));
+  } catch {
+    // localStorage unavailable
+  }
+  return 300;
+}
 
 function getStoredTheme() {
   try {
@@ -180,7 +191,19 @@ export default function useTheme() {
     });
   }, []);
 
+  // 'custom' = pink asset family + a user-picked hue rotation (see App.css)
+  const [customHue, setCustomHueState] = useState(getStoredHue);
+  const setCustomHue = useCallback((h) => {
+    const clamped = Math.max(0, Math.min(359, Math.round(h)));
+    try {
+      localStorage.setItem(HUE_KEY, String(clamped));
+    } catch {
+      // ignore
+    }
+    setCustomHueState(clamped);
+  }, []);
+
   const assets = useMemo(() => THEME_ASSETS[theme === 'blue' ? 'blue' : 'pink'], [theme]);
 
-  return { theme, setTheme, toggleTheme, assets };
+  return { theme, setTheme, toggleTheme, assets, customHue, setCustomHue };
 }

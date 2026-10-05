@@ -567,6 +567,9 @@ function sendMediaCommand(op) {
 ipcMain.on('playback-state', (_e, s) => {
   if (!s || typeof s !== 'object') return;
   lastPlaybackState = s;
+  // No window needed — run before the destroyed-window early return so
+  // presence clears on quit instead of staying stale on Discord.
+  discordUpdate(s);
   const win = mainWindow;
   if (!win || win.isDestroyed()) return;
   if (updateThumbar) updateThumbar(!!s.isPlaying);
@@ -574,6 +577,111 @@ ipcMain.on('playback-state', (_e, s) => {
     ? Math.min(1, s.progress) : -1;
   win.setProgressBar(s.isPlaying ? p : -1);
   if (tray) tray.setToolTip(s.title ? `cupid — ${s.title}` : 'cupid player');
+});
+
+// ── Discord Rich Presence ────────────────────────────────
+// Optional: needs a Discord app client id in CUPID_DISCORD_CLIENT_ID
+// (create one free at discord.com/developers). discord-rpc is lazily
+// required so the app runs fine without the package or Discord.
+//
+// discord-rpc@4 Client is single-use: connect() caches _connectPromise
+// forever, so a failed login or a 'disconnected' event can never be
+// retried on the same client — we destroy it and build a fresh one.
+let discordEnabled = false;
+let discordClient = null;
+let discordReady = false;
+let discordLoginPromise = null; // serializes concurrent ensures
+let discordLastPush = { key: null, at: 0 };
+
+function discordClientId() {
+  return process.env.CUPID_DISCORD_CLIENT_ID || null; // lazily — .env may load after module scope
+}
+
+function discordDropClient() {
+  const c = discordClient;
+  discordClient = null;
+  discordReady = false;
+  if (c) c.destroy().catch(() => {});
+}
+
+async function discordEnsure() {
+  if (!discordClientId()) return false;
+  if (discordReady) return true;
+  if (discordLoginPromise) return discordLoginPromise;
+  discordLoginPromise = (async () => {
+    if (!discordClient) {
+      try {
+        // eslint-disable-next-line global-require
+        const RPC = require('discord-rpc');
+        discordClient = new RPC.Client({ transport: 'ipc' });
+        // Client emits 'error' (unhandled → main crash) and 'disconnected'
+        discordClient.on('error', () => {});
+        discordClient.on('disconnected', () => discordDropClient());
+      } catch {
+        return false; // package not installed
+      }
+    }
+    try {
+      await discordClient.login({ clientId: discordClientId() });
+      discordReady = true;
+    } catch {
+      discordDropClient(); // dead client — rebuild on next push
+    }
+    return discordReady;
+  })();
+  try {
+    return await discordLoginPromise;
+  } finally {
+    discordLoginPromise = null;
+  }
+}
+
+// Throttled: Discord caps ~1 activity update / 15s, and playback-state
+// fires per progress tick. Push only on content change or every 15s.
+async function discordUpdate(s) {
+  if (!discordEnabled) return;
+  const key = s.isPlaying && s.title
+    ? `${s.title}::${s.artist || ''}`
+    : 'idle';
+  const now = Date.now();
+  if (key === discordLastPush.key && now - discordLastPush.at < 15_000) return;
+  discordLastPush = { key, at: now };
+  if (!(await discordEnsure())) return;
+  try {
+    if (!s.isPlaying || !s.title) {
+      await discordClient.clearActivity();
+      return;
+    }
+    await discordClient.setActivity({
+      details: String(s.title).slice(0, 128),
+      state: s.artist ? `by ${String(s.artist).slice(0, 100)}` : 'cupid player',
+      largeImageKey: 'cupid',
+      largeImageText: 'cupid player',
+      instance: false,
+    });
+  } catch {
+    discordDropClient(); // dead socket — rebuild on next push
+  }
+}
+
+ipcMain.handle('discord-available', async () => {
+  if (!discordClientId()) return false;
+  try {
+    require.resolve('discord-rpc');
+    return true;
+  } catch {
+    return false;
+  }
+});
+
+ipcMain.on('set-discord-rpc', (_e, enabled) => {
+  discordEnabled = !!enabled;
+  discordLastPush = { key: null, at: 0 };
+  if (!discordEnabled) {
+    if (discordClient) discordClient.clearActivity().catch(() => {}).finally(discordDropClient);
+  } else {
+    discordUpdate(lastPlaybackState);
+  }
 });
 
 // ── Local audio library (user-editable playlist + mp3s) ───
@@ -894,6 +1002,134 @@ ipcMain.handle('open-music-folder', async () => {
   await fs.promises.mkdir(dir, { recursive: true });
   await shell.openPath(dir);
   return dir;
+});
+
+// ── Drag-drop import ─────────────────────────────────────
+// Copies audio files into the library, reads tags for title/artist/art,
+// and appends entries to playlist.json. Sources must be real files on
+// disk — only the audio extensions the player can serve are accepted.
+const IMPORTABLE_AUDIO_EXT = new Set(['.mp3', '.m4a', '.aac', '.flac', '.wav', '.ogg', '.opus']);
+const IMPORT_ART_EXT = { jpeg: '.jpg', png: '.png', webp: '.webp', gif: '.gif' };
+const IMPORT_MAX_FILE_BYTES = 512 * 1024 * 1024; // 512MB per file
+const IMPORT_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024; // 2GB per drop
+const IMPORT_MAX_FILES = 50;
+
+// playlist.json read-merge-append is serialized so concurrent imports
+// can't lose entries, and written tmp→rename so a crash can't leave a
+// truncated file (get-local-playlist would return [] forever).
+let playlistWriteChain = Promise.resolve();
+function appendToLocalPlaylist(entries) {
+  playlistWriteChain = playlistWriteChain.then(async () => {
+    let list = [];
+    try {
+      list = JSON.parse(await fs.promises.readFile(userPlaylistFile(), 'utf8'));
+      if (!Array.isArray(list)) list = [];
+    } catch { /* create a fresh playlist.json */ }
+    const tmp = `${userPlaylistFile()}.tmp`;
+    await fs.promises.writeFile(tmp, JSON.stringify([...list, ...entries], null, 2));
+    await fs.promises.rename(tmp, userPlaylistFile());
+  });
+  return playlistWriteChain;
+}
+
+ipcMain.handle('import-audio-files', async (_e, paths) => {
+  if (!Array.isArray(paths)) return { added: [], skipped: [] };
+  const dir = userAudioDir();
+  await fs.promises.mkdir(dir, { recursive: true });
+  const added = [];
+  // Everything past the cap reports as skipped so the toast doesn't lie
+  const skipped = paths.length > IMPORT_MAX_FILES ? paths.slice(IMPORT_MAX_FILES) : [];
+  let totalBytes = 0;
+
+  for (const src of paths.slice(0, IMPORT_MAX_FILES)) {
+    try {
+      if (typeof src !== 'string' || !path.isAbsolute(src)) { skipped.push(src); continue; }
+      // UNC / device-namespace paths pull remote content — reject
+      if (src.startsWith('\\\\') || src.startsWith('//')) { skipped.push(src); continue; }
+      const ext = path.extname(src).toLowerCase();
+      if (!IMPORTABLE_AUDIO_EXT.has(ext)) { skipped.push(src); continue; }
+      // lstat: a *.mp3 symlink would bypass the extension allowlist
+      const lst = await fs.promises.lstat(src);
+      if (lst.isSymbolicLink() || !lst.isFile()) { skipped.push(src); continue; }
+      if (lst.size > IMPORT_MAX_FILE_BYTES || totalBytes + lst.size > IMPORT_MAX_TOTAL_BYTES) {
+        skipped.push(src);
+        continue;
+      }
+      totalBytes += lst.size;
+
+      // Collision-safe destination name: "song.mp3" → "song (2).mp3".
+      // COPYFILE_EXCL: no TOCTOU window where a planted/leftover dest
+      // gets truncated, and no silent overwrites on a benign race.
+      const base = path.basename(src, ext);
+      let destName = `${base}${ext}`;
+      let dest = path.join(dir, destName);
+      for (let i = 2; ; i++) {
+        try {
+          await fs.promises.copyFile(src, dest, fs.constants.COPYFILE_EXCL);
+          break;
+        } catch (err) {
+          if (err.code !== 'EEXIST') throw err;
+          destName = `${base} (${i})${ext}`;
+          dest = path.join(dir, destName);
+        }
+      }
+
+      // Tag metadata — fall back to "Artist - Title" filename split
+      let meta = {};
+      try {
+        const { parseFile } = await import('music-metadata');
+        meta = await parseFile(dest);
+      } catch { /* untagged file — filename fallback below */ }
+      const fileTitle = base.includes(' - ')
+        ? base.split(' - ').slice(1).join(' - ').trim()
+        : base;
+      const fileArtist = base.includes(' - ') ? base.split(' - ')[0].trim() : '';
+
+      // Embedded art → song photos/<name>.<ext> like the seeded library
+      let art = null;
+      const pic = meta.common?.picture?.[0];
+      if (pic) {
+        const artExt = IMPORT_ART_EXT[(pic.format || '').replace('image/', '')] || '.jpg';
+        const artDir = path.join(dir, 'song photos');
+        await fs.promises.mkdir(artDir, { recursive: true });
+        let artName = `${base}${artExt}`;
+        for (let i = 2; ; i++) {
+          try {
+            await fs.promises.writeFile(path.join(artDir, artName), pic.data, { flag: 'wx' });
+            break;
+          } catch (err) {
+            if (err.code !== 'EEXIST') throw err;
+            artName = `${base} (${i})${artExt}`;
+          }
+        }
+        art = `song photos/${artName}`;
+      }
+
+      added.push({
+        file: destName,
+        title: meta.common?.title || fileTitle,
+        artist: meta.common?.artist || fileArtist,
+        album: meta.common?.album || '',
+        ...(art ? { art } : {}),
+      });
+    } catch (err) {
+      console.warn('[import]', src, err.message);
+      skipped.push(src);
+    }
+  }
+
+  let playlistError = null;
+  if (added.length) {
+    try {
+      await appendToLocalPlaylist(added);
+    } catch (err) {
+      // Files were copied — report them imported but flag the listing
+      // failure rather than silently orphaning them.
+      console.warn('[import playlist]', err.message);
+      playlistError = err.message;
+    }
+  }
+  return { added, skipped, ...(playlistError ? { error: playlistError } : {}) };
 });
 
 // Resolve a relative filename inside the audio dir — shared safety check.
