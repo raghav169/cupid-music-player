@@ -254,11 +254,12 @@ export default function usePlayer(tracks, playMode = 'normal', adapter, startAtR
         && audio.duration - audio.currentTime <= secs
         && live.length > 0
         // 'repeat' replays the current track — a fade to a different one
-        // would violate that; single-track repeat fades into itself fine
+        // would violate that; and a self-fade (1-track queue) would skip
+        // the intro on every loop since the deck promotes mid-song
         && !(playModeRef.current === 'repeat' && live.length > 1)
       ) {
         const nxt = nextIdxRef.current;
-        const nextTrack = nxt != null ? live[nxt] : null;
+        const nextTrack = nxt != null && nxt !== trackIndexRef.current ? live[nxt] : null;
         if (nextTrack) {
           // Stream resolves can take seconds (yt-dlp) — re-validate that
           // the arm still holds when the URL lands, or a stale fade fires
